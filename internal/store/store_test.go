@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -183,6 +185,56 @@ func TestIdentityParsers(t *testing.T) {
 	}
 	if got := vendorFromMAC("d0:11:e5:b1:de:c0"); got != "Apple" {
 		t.Fatalf("vendor = %q, want Apple", got)
+	}
+}
+
+func TestUniFiSettingsAndImport(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	apiKey := "test-key"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-API-KEY") != apiKey {
+			http.Error(w, "missing key", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"ip":"192.168.222.25","hostname":"Library-iMac.local","mac":"d0:11:e5:b1:de:c0","oui":"Apple"}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	saved, err := st.SaveUniFiSettings(ctx, UniFiSettings{Enabled: true, BaseURL: server.URL, Site: "default", APIKey: apiKey})
+	if err != nil {
+		t.Fatalf("save unifi settings: %v", err)
+	}
+	if saved.APIKey != "" || !saved.HasAPIKey {
+		t.Fatalf("saved settings leaked key or missed key flag: %#v", saved)
+	}
+	result, err := st.TestUniFi(ctx)
+	if err != nil {
+		t.Fatalf("test unifi: %v", err)
+	}
+	if result.Seen != 1 {
+		t.Fatalf("test saw %d clients, want 1", result.Seen)
+	}
+	result, err = st.ImportUniFiClients(ctx)
+	if err != nil {
+		t.Fatalf("import unifi: %v", err)
+	}
+	if result.Updated != 1 {
+		t.Fatalf("updated = %d, want 1", result.Updated)
+	}
+	hosts, err := st.Hosts(ctx)
+	if err != nil {
+		t.Fatalf("hosts: %v", err)
+	}
+	var found Host
+	for _, host := range hosts {
+		if host.SourceIP == "192.168.222.25" {
+			found = host
+		}
+	}
+	if found.Hostname != "library-imac.local" || found.MAC != "d0:11:e5:b1:de:c0" || found.IdentityConfidence != "unifi" {
+		t.Fatalf("imported host = %#v", found)
 	}
 }
 

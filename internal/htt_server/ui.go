@@ -110,12 +110,12 @@ const indexHTML = `<!doctype html>
     <section id="view"></section>
   </main>
 <script>
-const pages = ["Dashboard","Realtime","Blocked","Hosts","Rules","Lists","Records","Reports","Audit","Load"];
+const pages = ["Dashboard","Realtime","Blocked","Hosts","Rules","Lists","Records","Reports","Audit","Load","Settings"];
 function pageFromHash() {
   const raw = decodeURIComponent((window.location.hash || "").replace(/^#/, ""));
   return pages.includes(raw) ? raw : "Dashboard";
 }
-let state = { page:pageFromHash(), dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], audit:[], hostReport:null };
+let state = { page:pageFromHash(), dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], audit:[], hostReport:null, unifi:null };
 let blocklistPresets = [];
 let blocklistSources = [];
 const $ = s => document.querySelector(s);
@@ -194,6 +194,7 @@ function render() {
   if (state.page === "Reports") { const r = state.hostReport; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Host Report</h2><span class="muted">'+(r?.host?.label||r?.host?.source_ip||'no host yet')+'</span></div>'+(r ? '<div class="metrics" style="grid-template-columns:repeat(3,1fr);margin:0 0 12px"><div><div class="metric-label">Queries</div><div class="metric-value">'+r.total_queries+'</div></div><div><div class="metric-label">Blocked</div><div class="metric-value">'+r.total_blocked+'</div></div><div><div class="metric-label">Domains</div><div class="metric-value">'+r.unique_domains+'</div></div></div><div class="section-title"><h2>Top Domains</h2><span class="muted">one-click policy</span></div>'+topList(r.top_domains||[], {block:true})+'<div class="section-title" style="margin-top:12px"><h2>Notes</h2></div><ul>'+r.recommended_notes.map(n => '<li>'+n+'</li>').join("")+'</ul>' : '<p class="muted">No host activity has been recorded yet.</p>')+'</div><div class="card"><div class="section-title"><h2>Policy Report</h2></div>'+topList(d.rule_hits||[])+'</div></div>'; }
   if (state.page === "Audit") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Audit Log</h2><span class="muted">policy, list, and admin changes</span></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead><tbody>'+state.audit.map(e => '<tr><td class="mono">'+fmtTime(e.timestamp)+'</td><td class="mono">'+esc(e.action)+'</td><td class="mono domain-cell">'+esc(e.target)+'</td><td>'+esc(e.detail)+'</td></tr>').join("")+'</tbody></table></div></div>';
   if (state.page === "Load") { const dns = state.dashboard?.dns || {}; const sys = state.dashboard?.system || {}; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Service Load</h2></div><table><tbody>'+Object.entries(dns).map(([k,v]) => '<tr><th>'+k+'</th><td class="mono">'+JSON.stringify(v)+'</td></tr>').join("")+'</tbody></table></div><div class="card"><div class="section-title"><h2>System</h2></div><table><tbody>'+Object.entries(sys).map(([k,v]) => '<tr><th>'+k+'</th><td class="mono">'+JSON.stringify(v)+'</td></tr>').join("")+'</tbody></table></div></div>'; }
+  if (state.page === "Settings") { const u = state.unifi || {}; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>UniFi Identity Import</h2><span class="muted">optional, never required</span></div><div class="toolbar"><label class="switch"><input id="unifiEnabled" type="checkbox" '+(u.enabled?'checked':'')+'><span class="slider"></span><span>Enabled</span></label></div><div class="toolbar"><input id="unifiBaseURL" placeholder="https://unifi.example.com" value="'+esc(u.base_url||'')+'" style="min-width:320px"><input id="unifiSite" placeholder="default" value="'+esc(u.site||'default')+'" style="width:130px"><input id="unifiAPIKey" type="password" placeholder="'+(u.has_api_key?'API key saved - leave blank to keep':'API key')+'" style="min-width:260px"><button class="primary" onclick="saveUniFi()">Save</button><button class="secondary" onclick="testUniFi()">Test</button><button class="secondary" onclick="importUniFi()">Import Clients</button></div><p class="muted">Create a read-only UniFi API key, enter the UniFi OS/controller URL and site name, then test before importing. This only imports client names, IPs, MACs, and vendors into host identity fields.</p><p class="muted mono">Status: '+esc(u.last_status||'not configured')+' · Last import: '+esc(u.last_import||'never')+'</p></div><div class="card"><div class="section-title"><h2>Instructions</h2></div><ol><li>In UniFi, create an API key for a read-only/admin account that can read Network clients.</li><li>Use the UniFi console URL, usually https://gateway-ip or https://unifi-host:8443.</li><li>Leave site as default unless your controller uses another site id.</li><li>Click Test. If it sees clients, click Import Clients.</li></ol><p class="muted">If a site does not use UniFi, leave this blank. PTR, Bonjour, and ARP discovery will continue to work without it.</p></div></div>'; }
 }
 async function load() {
   state.dashboard = await api('/api/dashboard');
@@ -203,6 +204,7 @@ async function load() {
   state.rules = await api('/api/rules');
   state.records = await api('/api/records');
   state.audit = await api('/api/audit');
+  state.unifi = await api('/api/settings/unifi');
   blocklistPresets = await api('/api/blocklist-presets');
   blocklistSources = await api('/api/blocklist-sources');
   state.hostReport = state.hosts.length ? await api('/api/reports/host/'+state.hosts[0].id) : null;
@@ -253,6 +255,22 @@ async function refreshLists() {
 }
 async function addRecord() {
   await api('/api/records', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:$("#recName").value, type:$("#recType").value, value:$("#recValue").value, ttl:Number($("#recTTL").value||60)})});
+  await load();
+}
+async function saveUniFi() {
+  state.unifi = await api('/api/settings/unifi', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:$("#unifiEnabled").checked, base_url:$("#unifiBaseURL").value, site:$("#unifiSite").value, api_key:$("#unifiAPIKey").value})});
+  await load();
+}
+async function testUniFi() {
+  await saveUniFi();
+  const result = await api('/api/settings/unifi/test', {method:'POST'});
+  alert(result.status === 'ok' ? 'Connected. Saw '+result.seen+' clients.' : 'UniFi test failed: '+result.error);
+  await load();
+}
+async function importUniFi() {
+  await saveUniFi();
+  const result = await api('/api/settings/unifi/import', {method:'POST'});
+  alert(result.status === 'ok' ? 'Imported '+result.updated+' of '+result.seen+' clients.' : 'UniFi import failed: '+result.error);
   await load();
 }
 load().catch(e => { $("#view").innerHTML = '<div class="card" style="margin-top:12px;color:var(--red)">'+e.message+'</div>'; });

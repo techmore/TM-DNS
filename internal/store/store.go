@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -165,6 +167,30 @@ type HostReport struct {
 	RecommendedNotes []string `json:"recommended_notes"`
 }
 
+type UniFiSettings struct {
+	Enabled    bool   `json:"enabled"`
+	BaseURL    string `json:"base_url"`
+	Site       string `json:"site"`
+	APIKey     string `json:"api_key,omitempty"`
+	HasAPIKey  bool   `json:"has_api_key"`
+	LastImport string `json:"last_import"`
+	LastStatus string `json:"last_status"`
+}
+
+type UniFiImportResult struct {
+	Status  string `json:"status"`
+	Seen    int    `json:"seen"`
+	Updated int    `json:"updated"`
+	Error   string `json:"error,omitempty"`
+}
+
+type uniFiClient struct {
+	IP       string
+	Hostname string
+	MAC      string
+	Vendor   string
+}
+
 type AuditEvent struct {
 	ID        int64  `json:"id"`
 	Timestamp string `json:"timestamp"`
@@ -308,6 +334,10 @@ func (s *Store) migrate(ctx context.Context) error {
 			action TEXT NOT NULL,
 			target TEXT NOT NULL,
 			detail TEXT NOT NULL DEFAULT ''
+		);`,
+		`CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS system_samples (
 			id INTEGER PRIMARY KEY,
@@ -972,13 +1002,13 @@ func (s *Store) UpdateHostIdentity(ctx context.Context, hostID int64, update Hos
 	}
 
 	_, err = tx.ExecContext(ctx, `UPDATE hosts
-		SET hostname = CASE WHEN hostname = '' AND ? != '' THEN ? ELSE hostname END,
-			mac = CASE WHEN mac = '' AND ? != '' THEN ? ELSE mac END,
-			vendor = CASE WHEN vendor = '' AND ? != '' THEN ? ELSE vendor END,
-			identity_confidence = CASE WHEN ? != '' AND identity_confidence = 'source_ip' THEN ? ELSE identity_confidence END,
+		SET hostname = CASE WHEN (hostname = '' OR ? = 'unifi') AND ? != '' THEN ? ELSE hostname END,
+			mac = CASE WHEN (mac = '' OR ? = 'unifi') AND ? != '' THEN ? ELSE mac END,
+			vendor = CASE WHEN (vendor = '' OR ? = 'unifi') AND ? != '' THEN ? ELSE vendor END,
+			identity_confidence = CASE WHEN ? != '' AND (identity_confidence = 'source_ip' OR ? = 'unifi') THEN ? ELSE identity_confidence END,
 			identity_last_checked = ?
 		WHERE id = ?`,
-		update.Hostname, update.Hostname, update.MAC, update.MAC, update.Vendor, update.Vendor, update.Confidence, update.Confidence, now, hostID)
+		update.Confidence, update.Hostname, update.Hostname, update.Confidence, update.MAC, update.MAC, update.Confidence, update.Vendor, update.Vendor, update.Confidence, update.Confidence, update.Confidence, now, hostID)
 	if err != nil {
 		return err
 	}
@@ -1166,6 +1196,138 @@ func (s *Store) AuditEvents(ctx context.Context, limit int) ([]AuditEvent, error
 	return events, rows.Err()
 }
 
+func (s *Store) UniFiSettings(ctx context.Context) (UniFiSettings, error) {
+	settings := UniFiSettings{Site: "default"}
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM settings WHERE key LIKE 'unifi.%'`)
+	if err != nil {
+		return settings, err
+	}
+	defer rows.Close()
+	values := map[string]string{}
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return settings, err
+		}
+		values[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return settings, err
+	}
+	settings.Enabled = values["unifi.enabled"] == "true"
+	settings.BaseURL = values["unifi.base_url"]
+	if values["unifi.site"] != "" {
+		settings.Site = values["unifi.site"]
+	}
+	settings.APIKey = values["unifi.api_key"]
+	settings.HasAPIKey = settings.APIKey != ""
+	settings.LastImport = values["unifi.last_import"]
+	settings.LastStatus = values["unifi.last_status"]
+	return settings, nil
+}
+
+func (s *Store) SaveUniFiSettings(ctx context.Context, settings UniFiSettings) (UniFiSettings, error) {
+	settings.BaseURL = strings.TrimRight(strings.TrimSpace(settings.BaseURL), "/")
+	settings.Site = strings.TrimSpace(settings.Site)
+	settings.APIKey = strings.TrimSpace(settings.APIKey)
+	if settings.Site == "" {
+		settings.Site = "default"
+	}
+	if settings.BaseURL != "" {
+		parsed, err := url.Parse(settings.BaseURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return UniFiSettings{}, errors.New("base_url must be a full http:// or https:// URL")
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return UniFiSettings{}, err
+	}
+	defer tx.Rollback()
+	pairs := map[string]string{
+		"unifi.enabled":  fmt.Sprintf("%t", settings.Enabled),
+		"unifi.base_url": settings.BaseURL,
+		"unifi.site":     settings.Site,
+	}
+	if settings.APIKey != "" {
+		pairs["unifi.api_key"] = settings.APIKey
+	}
+	for key, value := range pairs {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value); err != nil {
+			return UniFiSettings{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return UniFiSettings{}, err
+	}
+	_ = s.Audit(ctx, "unifi.settings", settings.BaseURL, fmt.Sprintf("enabled=%t site=%s", settings.Enabled, settings.Site))
+	out, err := s.UniFiSettings(ctx)
+	if err != nil {
+		return UniFiSettings{}, err
+	}
+	out.APIKey = ""
+	return out, nil
+}
+
+func (s *Store) TestUniFi(ctx context.Context) (UniFiImportResult, error) {
+	settings, err := s.UniFiSettings(ctx)
+	if err != nil {
+		return UniFiImportResult{}, err
+	}
+	clients, err := fetchUniFiClients(ctx, settings)
+	result := UniFiImportResult{Status: "ok", Seen: len(clients)}
+	if err != nil {
+		result.Status = "error"
+		result.Error = err.Error()
+	}
+	_ = s.setSetting(ctx, "unifi.last_status", result.Status)
+	return result, err
+}
+
+func (s *Store) ImportUniFiClients(ctx context.Context) (UniFiImportResult, error) {
+	settings, err := s.UniFiSettings(ctx)
+	if err != nil {
+		return UniFiImportResult{}, err
+	}
+	if !settings.Enabled {
+		return UniFiImportResult{Status: "disabled", Error: "UniFi import is disabled"}, nil
+	}
+	clients, err := fetchUniFiClients(ctx, settings)
+	if err != nil {
+		_ = s.setSetting(ctx, "unifi.last_status", "error: "+err.Error())
+		return UniFiImportResult{Status: "error", Error: err.Error()}, err
+	}
+	updated := 0
+	for _, client := range clients {
+		if net.ParseIP(client.IP) == nil {
+			continue
+		}
+		hostID, _, err := s.EnsureHost(ctx, client.IP)
+		if err != nil {
+			return UniFiImportResult{}, err
+		}
+		if err := s.UpdateHostIdentity(ctx, hostID, HostIdentityUpdate{
+			Hostname:   client.Hostname,
+			MAC:        client.MAC,
+			Vendor:     client.Vendor,
+			Confidence: "unifi",
+		}); err != nil {
+			return UniFiImportResult{}, err
+		}
+		updated++
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_ = s.setSetting(ctx, "unifi.last_import", now)
+	_ = s.setSetting(ctx, "unifi.last_status", "ok")
+	_ = s.Audit(ctx, "unifi.import", settings.BaseURL, fmt.Sprintf("seen=%d updated=%d", len(clients), updated))
+	return UniFiImportResult{Status: "ok", Seen: len(clients), Updated: updated}, nil
+}
+
+func (s *Store) setSetting(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
 func hostReportNotes(report HostReport) []string {
 	notes := []string{}
 	if report.TotalQueries == 0 {
@@ -1318,6 +1480,102 @@ func vendorFromMAC(mac string) string {
 	default:
 		return ""
 	}
+}
+
+func fetchUniFiClients(ctx context.Context, settings UniFiSettings) ([]uniFiClient, error) {
+	settings.BaseURL = strings.TrimRight(strings.TrimSpace(settings.BaseURL), "/")
+	settings.Site = strings.TrimSpace(settings.Site)
+	if settings.Site == "" {
+		settings.Site = "default"
+	}
+	if settings.BaseURL == "" {
+		return nil, errors.New("UniFi base URL is required")
+	}
+	if settings.APIKey == "" {
+		return nil, errors.New("UniFi API key is required")
+	}
+	endpoints := []string{
+		fmt.Sprintf("%s/proxy/network/api/s/%s/stat/sta", settings.BaseURL, url.PathEscape(settings.Site)),
+		fmt.Sprintf("%s/proxy/network/api/s/%s/rest/user", settings.BaseURL, url.PathEscape(settings.Site)),
+		fmt.Sprintf("%s/api/s/%s/stat/sta", settings.BaseURL, url.PathEscape(settings.Site)),
+		fmt.Sprintf("%s/api/s/%s/rest/user", settings.BaseURL, url.PathEscape(settings.Site)),
+	}
+	client := http.Client{Timeout: 8 * time.Second}
+	var lastErr error
+	for _, endpoint := range endpoints {
+		clients, err := fetchUniFiEndpoint(ctx, &client, endpoint, settings.APIKey)
+		if err == nil {
+			return clients, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no UniFi endpoints attempted")
+	}
+	return nil, lastErr
+}
+
+func fetchUniFiEndpoint(ctx context.Context, client *http.Client, endpoint, apiKey string) ([]uniFiClient, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-API-KEY", apiKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("UniFi returned HTTP %d for %s", resp.StatusCode, endpoint)
+	}
+	var body struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 20<<20)).Decode(&body); err != nil {
+		return nil, err
+	}
+	clients := make([]uniFiClient, 0, len(body.Data))
+	for _, raw := range body.Data {
+		client := uniFiClient{
+			IP:       firstString(raw, "ip", "last_ip", "fixed_ip"),
+			Hostname: firstString(raw, "hostname", "name", "display_name", "dev_alias"),
+			MAC:      firstString(raw, "mac"),
+			Vendor:   firstString(raw, "oui", "vendor"),
+		}
+		client.Hostname = cleanHostname(client.Hostname)
+		client.MAC = normalizeMAC(client.MAC)
+		if client.Vendor == "" {
+			client.Vendor = vendorFromMAC(client.MAC)
+		}
+		if client.IP != "" && (client.Hostname != "" || client.MAC != "") {
+			clients = append(clients, client)
+		}
+	}
+	if len(clients) == 0 {
+		return nil, errors.New("UniFi request succeeded but returned no clients with IP/name data")
+	}
+	return clients, nil
+}
+
+func firstString(raw map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := raw[key]
+		if !ok || value == nil {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			if strings.TrimSpace(typed) != "" {
+				return strings.TrimSpace(typed)
+			}
+		case float64:
+			return fmt.Sprintf("%.0f", typed)
+		}
+	}
+	return ""
 }
 
 func (s *Store) topRows(ctx context.Context, query string, args ...any) ([]TopRow, error) {

@@ -69,6 +69,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/records", s.records)
 	s.mux.HandleFunc("/api/reports/host/", s.hostReport)
 	s.mux.HandleFunc("/api/audit", s.audit)
+	s.mux.HandleFunc("/api/settings/unifi", s.unifiSettings)
+	s.mux.HandleFunc("/api/settings/unifi/test", s.unifiTest)
+	s.mux.HandleFunc("/api/settings/unifi/import", s.unifiImport)
 }
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
@@ -386,6 +389,59 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, events)
+}
+
+func (s *Server) unifiSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := s.store.UniFiSettings(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		settings.APIKey = ""
+		writeJSON(w, settings)
+	case http.MethodPut:
+		var body store.UniFiSettings
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, err)
+			return
+		}
+		settings, err := s.store.SaveUniFiSettings(r.Context(), body)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, settings)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) unifiTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	result, err := s.store.TestUniFi(r.Context())
+	if err != nil {
+		writeJSON(w, result)
+		return
+	}
+	writeJSON(w, result)
+}
+
+func (s *Server) unifiImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	result, err := s.store.ImportUniFiClients(r.Context())
+	if err != nil {
+		writeJSON(w, result)
+		return
+	}
+	writeJSON(w, result)
 }
 
 func writeJSON(w http.ResponseWriter, value any) {
