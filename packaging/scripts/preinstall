@@ -8,4 +8,11 @@ if [[ -f "${plist}" ]]; then
 	launchctl bootout system "${plist}" >/dev/null 2>&1 || true
 fi
 
+for pid in $(pgrep -x tmdns 2>/dev/null || true); do
+	command="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
+	if [[ -n "${command}" && "${command}" != /Library/Application\ Support/TM-DNS/tmdns* ]]; then
+		kill "${pid}" >/dev/null 2>&1 || true
+	fi
+done
+
 exit 0

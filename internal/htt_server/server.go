@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -122,7 +123,7 @@ func (s *Server) routes() {
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ok, cookieAuth := s.authorized(r)
-		if s.isPublicPath(r.URL.Path) || ok {
+		if s.isPublicPath(r.URL.Path) || isLoopbackRequest(r) || ok {
 			if ok && cookieAuth && !sameOriginUnsafeRequest(r) {
 				http.Error(w, "invalid request origin", http.StatusForbidden)
 				return
@@ -155,6 +156,15 @@ func (s *Server) authorized(r *http.Request) (bool, bool) {
 		}
 	}
 	return subtle.ConstantTimeCompare([]byte(token), []byte(s.adminToken)) == 1, cookieAuth
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func sameOriginUnsafeRequest(r *http.Request) bool {

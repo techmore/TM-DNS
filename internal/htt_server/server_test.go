@@ -151,3 +151,23 @@ func TestAPIRequiresAuth(t *testing.T) {
 		t.Fatalf("login status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestAPILoopbackBypassesAuth(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	st, err := store.Open(ctx, t.TempDir()+"/loopback.db", logger)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := config.Config{DNSAddr: "127.0.0.1:1053", HTTPAddr: "127.0.0.1:8080", DBPath: "test.db", Upstream: "1.1.1.1:53", EventQueueCap: 10, AdminToken: "secret"}
+	srv := New(cfg, st, dnsserver.New(cfg, st, logger), logger)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard", nil)
+	req.RemoteAddr = "127.0.0.1:49152"
+	rec := httptest.NewRecorder()
+	srv.server.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("loopback dashboard status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
