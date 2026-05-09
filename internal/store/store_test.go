@@ -134,6 +134,58 @@ func TestBlocklistSourceAddAndToggle(t *testing.T) {
 	}
 }
 
+func TestUpdateHostIdentity(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	hostID, label, err := st.EnsureHost(ctx, "192.0.2.44")
+	if err != nil {
+		t.Fatalf("ensure host: %v", err)
+	}
+	if label != "192.0.2.44" {
+		t.Fatalf("label = %q, want source IP", label)
+	}
+
+	err = st.UpdateHostIdentity(ctx, hostID, HostIdentityUpdate{
+		Hostname:   "Classroom-Mac.local.",
+		MAC:        "d0:11:e5:b1:de:c0",
+		Vendor:     "Apple",
+		Confidence: "mdns",
+	})
+	if err != nil {
+		t.Fatalf("update identity: %v", err)
+	}
+	host, err := st.Host(ctx, hostID)
+	if err != nil {
+		t.Fatalf("host: %v", err)
+	}
+	if host.Hostname != "classroom-mac.local" || host.MAC != "d0:11:e5:b1:de:c0" || host.Vendor != "Apple" {
+		t.Fatalf("identity = hostname %q mac %q vendor %q", host.Hostname, host.MAC, host.Vendor)
+	}
+	if host.IdentityConfidence != "mdns" || host.IdentityLastChecked == "" {
+		t.Fatalf("confidence = %q last_checked = %q", host.IdentityConfidence, host.IdentityLastChecked)
+	}
+}
+
+func TestIdentityParsers(t *testing.T) {
+	host, mac := parseARPOutput("? (192.168.222.8) at d0:11:e5:b1:de:c0 on en13 ifscope [ethernet]", "192.168.222.8")
+	if host != "" || mac != "d0:11:e5:b1:de:c0" {
+		t.Fatalf("parse arp unknown = host %q mac %q", host, mac)
+	}
+	host, mac = parseARPOutput("classroom.local (192.168.222.20) at 0:e0:4c:99:92:79 on en13 ifscope [ethernet]", "192.168.222.20")
+	if host != "classroom.local" || mac != "00:e0:4c:99:92:79" {
+		t.Fatalf("parse arp named = host %q mac %q", host, mac)
+	}
+	if got := reversePTRName("192.168.222.8"); got != "8.222.168.192.in-addr.arpa." {
+		t.Fatalf("reversePTRName = %q", got)
+	}
+	if got := parseDNSSDPTR([]byte("12:00:00.000  Add     2  4  192.168.222.8.in-addr.arpa. PTR mac-mini.local.")); got != "mac-mini.local" {
+		t.Fatalf("parseDNSSDPTR = %q", got)
+	}
+	if got := vendorFromMAC("d0:11:e5:b1:de:c0"); got != "Apple" {
+		t.Fatalf("vendor = %q, want Apple", got)
+	}
+}
+
 func TestParseBlocklistDomainsAndMatch(t *testing.T) {
 	input := `
 # comment

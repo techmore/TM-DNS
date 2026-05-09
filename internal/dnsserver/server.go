@@ -16,17 +16,20 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	store     *store.Store
-	logger    *slog.Logger
-	udp       *dns.Server
-	tcp       *dns.Server
-	events    chan store.QueryEvent
-	startedAt time.Time
-	dropped   atomic.Int64
-	queries   atomic.Int64
-	blocked   atomic.Int64
-	mu        sync.RWMutex
+	cfg            config.Config
+	store          *store.Store
+	logger         *slog.Logger
+	udp            *dns.Server
+	tcp            *dns.Server
+	events         chan store.QueryEvent
+	startedAt      time.Time
+	dropped        atomic.Int64
+	queries        atomic.Int64
+	blocked        atomic.Int64
+	mu             sync.RWMutex
+	enrichMu       sync.Mutex
+	enrichNext     map[string]time.Time
+	enrichInFlight map[string]struct{}
 }
 
 type Status struct {
@@ -42,11 +45,13 @@ type Status struct {
 
 func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Server {
 	return &Server{
-		cfg:       cfg,
-		store:     st,
-		logger:    logger,
-		events:    make(chan store.QueryEvent, cfg.EventQueueCap),
-		startedAt: time.Now(),
+		cfg:            cfg,
+		store:          st,
+		logger:         logger,
+		events:         make(chan store.QueryEvent, cfg.EventQueueCap),
+		startedAt:      time.Now(),
+		enrichNext:     make(map[string]time.Time),
+		enrichInFlight: make(map[string]struct{}),
 	}
 }
 
@@ -110,6 +115,8 @@ func (s *Server) handleDNS(w dns.ResponseWriter, r *dns.Msg) {
 	hostID, hostLabel, err := s.store.EnsureHost(context.Background(), sourceIP)
 	if err != nil {
 		s.logger.Warn("ensure host failed", "source_ip", sourceIP, "error", err)
+	} else {
+		s.enqueueHostEnrichment(hostID, sourceIP)
 	}
 
 	action := "allowed"
@@ -221,6 +228,39 @@ func (s *Server) handleDNS(w dns.ResponseWriter, r *dns.Msg) {
 		s.dropped.Add(1)
 		s.logger.Warn("event queue full; dropping query event", "query", qname, "source_ip", sourceIP)
 	}
+}
+
+func (s *Server) enqueueHostEnrichment(hostID int64, sourceIP string) {
+	ip := net.ParseIP(sourceIP)
+	if hostID == 0 || ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+		return
+	}
+	now := time.Now()
+	s.enrichMu.Lock()
+	if _, ok := s.enrichInFlight[sourceIP]; ok {
+		s.enrichMu.Unlock()
+		return
+	}
+	if next := s.enrichNext[sourceIP]; next.After(now) {
+		s.enrichMu.Unlock()
+		return
+	}
+	s.enrichInFlight[sourceIP] = struct{}{}
+	s.enrichNext[sourceIP] = now.Add(15 * time.Minute)
+	s.enrichMu.Unlock()
+
+	go func() {
+		defer func() {
+			s.enrichMu.Lock()
+			delete(s.enrichInFlight, sourceIP)
+			s.enrichMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := s.store.EnrichHostIdentity(ctx, hostID, sourceIP); err != nil {
+			s.logger.Debug("host identity enrichment failed", "source_ip", sourceIP, "host_id", hostID, "error", err)
+		}
+	}()
 }
 
 func (s *Server) staticAnswer(ctx context.Context, q dns.Question) ([]dns.RR, bool) {

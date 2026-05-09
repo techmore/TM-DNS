@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -120,22 +121,26 @@ type TopHostRow struct {
 	SourceIP string `json:"source_ip"`
 	Label    string `json:"label"`
 	Hostname string `json:"hostname"`
+	MAC      string `json:"mac"`
+	Vendor   string `json:"vendor"`
 	Count    int64  `json:"count"`
 }
 
 type Host struct {
-	ID                 int64  `json:"id"`
-	SourceIP           string `json:"source_ip"`
-	Label              string `json:"label"`
-	Hostname           string `json:"hostname"`
-	MAC                string `json:"mac"`
-	Group              string `json:"group"`
-	IdentityConfidence string `json:"identity_confidence"`
-	FirstSeen          string `json:"first_seen"`
-	LastSeen           string `json:"last_seen"`
-	QueryCount         int64  `json:"query_count"`
-	BlockCount         int64  `json:"block_count"`
-	Notes              string `json:"notes"`
+	ID                  int64  `json:"id"`
+	SourceIP            string `json:"source_ip"`
+	Label               string `json:"label"`
+	Hostname            string `json:"hostname"`
+	MAC                 string `json:"mac"`
+	Vendor              string `json:"vendor"`
+	Group               string `json:"group"`
+	IdentityConfidence  string `json:"identity_confidence"`
+	IdentityLastChecked string `json:"identity_last_checked"`
+	FirstSeen           string `json:"first_seen"`
+	LastSeen            string `json:"last_seen"`
+	QueryCount          int64  `json:"query_count"`
+	BlockCount          int64  `json:"block_count"`
+	Notes               string `json:"notes"`
 }
 
 type HostDetail struct {
@@ -200,8 +205,10 @@ func (s *Store) migrate(ctx context.Context) error {
 			label TEXT NOT NULL DEFAULT '',
 			hostname TEXT NOT NULL DEFAULT '',
 			mac TEXT NOT NULL DEFAULT '',
+			vendor TEXT NOT NULL DEFAULT '',
 			group_name TEXT NOT NULL DEFAULT 'Default',
 			identity_confidence TEXT NOT NULL DEFAULT 'source_ip',
+			identity_last_checked TEXT NOT NULL DEFAULT '',
 			first_seen TEXT NOT NULL,
 			last_seen TEXT NOT NULL,
 			query_count INTEGER NOT NULL DEFAULT 0,
@@ -320,7 +327,38 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate %q: %w", statement, err)
 		}
 	}
+	if err := s.ensureColumn(ctx, "hosts", "vendor", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "hosts", "identity_last_checked", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+definition)
+	return err
 }
 
 func (s *Store) SeedDefaults(ctx context.Context) error {
@@ -858,6 +896,107 @@ func (s *Store) SetHostLabel(ctx context.Context, id int64, label string) error 
 	return err
 }
 
+type HostIdentityUpdate struct {
+	Hostname   string
+	MAC        string
+	Vendor     string
+	Confidence string
+}
+
+func (s *Store) EnrichHostIdentity(ctx context.Context, hostID int64, sourceIP string) error {
+	sourceIP = strings.TrimSpace(sourceIP)
+	if net.ParseIP(sourceIP) == nil || sourceIP == "unknown" {
+		return nil
+	}
+	update := HostIdentityUpdate{}
+	ptrCtx, ptrCancel := context.WithTimeout(ctx, 800*time.Millisecond)
+	if hostname := lookupPTRHostname(ptrCtx, sourceIP); hostname != "" {
+		update.Hostname = hostname
+		update.Confidence = "ptr"
+	}
+	ptrCancel()
+
+	arpCtx, arpCancel := context.WithTimeout(ctx, 800*time.Millisecond)
+	arpHostname, mac := lookupARPIdentity(arpCtx, sourceIP)
+	arpCancel()
+	if update.Hostname == "" && arpHostname != "" {
+		update.Hostname = arpHostname
+		update.Confidence = "arp"
+	}
+	if mac != "" {
+		update.MAC = mac
+		update.Vendor = vendorFromMAC(mac)
+		if update.Confidence == "" {
+			update.Confidence = "arp"
+		}
+	}
+
+	mdnsCtx, mdnsCancel := context.WithTimeout(ctx, 1200*time.Millisecond)
+	if hostname := lookupMDNSPTR(mdnsCtx, sourceIP); hostname != "" && update.Hostname == "" {
+		update.Hostname = hostname
+		update.Confidence = "mdns"
+	}
+	mdnsCancel()
+	return s.UpdateHostIdentity(ctx, hostID, update)
+}
+
+func (s *Store) UpdateHostIdentity(ctx context.Context, hostID int64, update HostIdentityUpdate) error {
+	update.Hostname = cleanHostname(update.Hostname)
+	update.MAC = normalizeMAC(update.MAC)
+	update.Vendor = strings.TrimSpace(update.Vendor)
+	update.Confidence = strings.TrimSpace(update.Confidence)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var currentHostname, currentMAC, currentVendor, currentConfidence string
+	if err := tx.QueryRowContext(ctx, `SELECT hostname, mac, vendor, identity_confidence FROM hosts WHERE id = ?`, hostID).
+		Scan(&currentHostname, &currentMAC, &currentVendor, &currentConfidence); err != nil {
+		return err
+	}
+	if update.Hostname == "" {
+		update.Hostname = currentHostname
+	}
+	if update.MAC == "" {
+		update.MAC = currentMAC
+	}
+	if update.Vendor == "" {
+		update.Vendor = currentVendor
+	}
+	if update.Confidence == "" {
+		update.Confidence = currentConfidence
+	}
+
+	_, err = tx.ExecContext(ctx, `UPDATE hosts
+		SET hostname = CASE WHEN hostname = '' AND ? != '' THEN ? ELSE hostname END,
+			mac = CASE WHEN mac = '' AND ? != '' THEN ? ELSE mac END,
+			vendor = CASE WHEN vendor = '' AND ? != '' THEN ? ELSE vendor END,
+			identity_confidence = CASE WHEN ? != '' AND identity_confidence = 'source_ip' THEN ? ELSE identity_confidence END,
+			identity_last_checked = ?
+		WHERE id = ?`,
+		update.Hostname, update.Hostname, update.MAC, update.MAC, update.Vendor, update.Vendor, update.Confidence, update.Confidence, now, hostID)
+	if err != nil {
+		return err
+	}
+	for source, value := range map[string]string{
+		"hostname": update.Hostname,
+		"mac":      update.MAC,
+		"vendor":   update.Vendor,
+	} {
+		if value == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO host_observations(host_id, source, value, observed_at) VALUES(?, ?, ?, ?)`, hostID, source, value, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) InsertQueryEvent(ctx context.Context, event QueryEvent) error {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
@@ -925,7 +1064,7 @@ func (s *Store) Dashboard(ctx context.Context, dbPath string) (Dashboard, error)
 }
 
 func (s *Store) Hosts(ctx context.Context) ([]Host, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, source_ip, label, hostname, mac, group_name, identity_confidence, first_seen, last_seen, query_count, block_count, notes FROM hosts ORDER BY last_seen DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, source_ip, label, hostname, mac, vendor, group_name, identity_confidence, identity_last_checked, first_seen, last_seen, query_count, block_count, notes FROM hosts ORDER BY last_seen DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -933,7 +1072,7 @@ func (s *Store) Hosts(ctx context.Context) ([]Host, error) {
 	var hosts []Host
 	for rows.Next() {
 		var host Host
-		if err := rows.Scan(&host.ID, &host.SourceIP, &host.Label, &host.Hostname, &host.MAC, &host.Group, &host.IdentityConfidence, &host.FirstSeen, &host.LastSeen, &host.QueryCount, &host.BlockCount, &host.Notes); err != nil {
+		if err := rows.Scan(&host.ID, &host.SourceIP, &host.Label, &host.Hostname, &host.MAC, &host.Vendor, &host.Group, &host.IdentityConfidence, &host.IdentityLastChecked, &host.FirstSeen, &host.LastSeen, &host.QueryCount, &host.BlockCount, &host.Notes); err != nil {
 			return nil, err
 		}
 		hosts = append(hosts, host)
@@ -943,8 +1082,8 @@ func (s *Store) Hosts(ctx context.Context) ([]Host, error) {
 
 func (s *Store) Host(ctx context.Context, id int64) (Host, error) {
 	var host Host
-	err := s.db.QueryRowContext(ctx, `SELECT id, source_ip, label, hostname, mac, group_name, identity_confidence, first_seen, last_seen, query_count, block_count, notes FROM hosts WHERE id = ?`, id).
-		Scan(&host.ID, &host.SourceIP, &host.Label, &host.Hostname, &host.MAC, &host.Group, &host.IdentityConfidence, &host.FirstSeen, &host.LastSeen, &host.QueryCount, &host.BlockCount, &host.Notes)
+	err := s.db.QueryRowContext(ctx, `SELECT id, source_ip, label, hostname, mac, vendor, group_name, identity_confidence, identity_last_checked, first_seen, last_seen, query_count, block_count, notes FROM hosts WHERE id = ?`, id).
+		Scan(&host.ID, &host.SourceIP, &host.Label, &host.Hostname, &host.MAC, &host.Vendor, &host.Group, &host.IdentityConfidence, &host.IdentityLastChecked, &host.FirstSeen, &host.LastSeen, &host.QueryCount, &host.BlockCount, &host.Notes)
 	return host, err
 }
 
@@ -1044,6 +1183,143 @@ func hostReportNotes(report HostReport) []string {
 	return notes
 }
 
+var arpMACRE = regexp.MustCompile(`(?i)\b([0-9a-f]{1,2}(?::[0-9a-f]{1,2}){5})\b`)
+
+func lookupPTRHostname(ctx context.Context, sourceIP string) string {
+	names, err := net.DefaultResolver.LookupAddr(ctx, sourceIP)
+	if err != nil {
+		return ""
+	}
+	for _, name := range names {
+		if cleaned := cleanHostname(name); cleaned != "" {
+			return cleaned
+		}
+	}
+	return ""
+}
+
+func lookupMDNSPTR(ctx context.Context, sourceIP string) string {
+	reverse := reversePTRName(sourceIP)
+	if reverse == "" {
+		return ""
+	}
+	cmd := exec.CommandContext(ctx, "/usr/bin/dns-sd", "-Q", reverse, "PTR")
+	output, err := cmd.CombinedOutput()
+	if err != nil && len(output) == 0 {
+		return ""
+	}
+	return parseDNSSDPTR(output)
+}
+
+func lookupARPIdentity(ctx context.Context, sourceIP string) (string, string) {
+	cmd := exec.CommandContext(ctx, "/usr/sbin/arp", "-n", sourceIP)
+	output, err := cmd.CombinedOutput()
+	if err != nil && len(output) == 0 {
+		cmd = exec.CommandContext(ctx, "/usr/sbin/arp", sourceIP)
+		output, err = cmd.CombinedOutput()
+		if err != nil && len(output) == 0 {
+			return "", ""
+		}
+	}
+	return parseARPOutput(string(output), sourceIP)
+}
+
+func parseARPOutput(output, sourceIP string) (string, string) {
+	var hostname string
+	for _, line := range strings.Split(output, "\n") {
+		if sourceIP != "" && !strings.Contains(line, sourceIP) {
+			continue
+		}
+		mac := ""
+		if match := arpMACRE.FindStringSubmatch(line); len(match) > 1 {
+			mac = normalizeMAC(match[1])
+		}
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] != "?" && fields[0] != sourceIP {
+			hostname = cleanHostname(fields[0])
+		}
+		if mac != "" {
+			return hostname, mac
+		}
+	}
+	return hostname, ""
+}
+
+func reversePTRName(sourceIP string) string {
+	ip := net.ParseIP(sourceIP)
+	if ip == nil {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa.", v4[3], v4[2], v4[1], v4[0])
+	}
+	return ""
+}
+
+func parseDNSSDPTR(output []byte) string {
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		for i := len(fields) - 1; i >= 0; i-- {
+			if strings.HasSuffix(strings.ToLower(fields[i]), ".local.") {
+				return cleanHostname(fields[i])
+			}
+		}
+	}
+	return ""
+}
+
+func cleanHostname(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimSuffix(value, ".")
+	if value == "" || value == "?" || strings.EqualFold(value, "unknown") {
+		return ""
+	}
+	return strings.ToLower(value)
+}
+
+func normalizeMAC(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+	parts := strings.Split(value, ":")
+	if len(parts) != 6 {
+		return ""
+	}
+	for i, part := range parts {
+		if len(part) == 1 {
+			parts[i] = "0" + part
+		}
+		if len(parts[i]) != 2 {
+			return ""
+		}
+	}
+	return strings.Join(parts, ":")
+}
+
+func vendorFromMAC(mac string) string {
+	prefix := strings.ToUpper(strings.ReplaceAll(normalizeMAC(mac), ":", ""))
+	if len(prefix) < 6 {
+		return ""
+	}
+	switch prefix[:6] {
+	case "00163E":
+		return "Xensource"
+	case "001C42":
+		return "Parallels"
+	case "005056":
+		return "VMware"
+	case "00E04C":
+		return "Realtek"
+	case "D011E5", "3C22FB", "F0D1A9", "A8A159", "ACDE48":
+		return "Apple"
+	case "60F81D", "68D79A", "70A741", "7483C2", "B4FBE4", "D021F9", "E063DA":
+		return "Ubiquiti"
+	default:
+		return ""
+	}
+}
+
 func (s *Store) topRows(ctx context.Context, query string, args ...any) ([]TopRow, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -1062,7 +1338,7 @@ func (s *Store) topRows(ctx context.Context, query string, args ...any) ([]TopRo
 }
 
 func (s *Store) topHostRows(ctx context.Context, since string) ([]TopHostRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT h.id, COALESCE(NULLIF(h.label, ''), NULLIF(h.hostname, ''), h.source_ip), h.source_ip, h.label, h.hostname, COUNT(*)
+	rows, err := s.db.QueryContext(ctx, `SELECT h.id, COALESCE(NULLIF(h.label, ''), NULLIF(h.hostname, ''), h.source_ip), h.source_ip, h.label, h.hostname, h.mac, h.vendor, COUNT(*)
 		FROM query_events qe JOIN hosts h ON h.id = qe.host_id
 		WHERE qe.ts >= ?
 		GROUP BY qe.host_id
@@ -1075,7 +1351,7 @@ func (s *Store) topHostRows(ctx context.Context, since string) ([]TopHostRow, er
 	var out []TopHostRow
 	for rows.Next() {
 		var row TopHostRow
-		if err := rows.Scan(&row.ID, &row.Key, &row.SourceIP, &row.Label, &row.Hostname, &row.Count); err != nil {
+		if err := rows.Scan(&row.ID, &row.Key, &row.SourceIP, &row.Label, &row.Hostname, &row.MAC, &row.Vendor, &row.Count); err != nil {
 			return nil, err
 		}
 		out = append(out, row)
