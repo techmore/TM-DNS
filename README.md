@@ -88,6 +88,20 @@ tail -f /tmp/tmdns-dev.log
 
 Full local verification:
 
+## LAN Run Path
+
+For a live LAN resolver, the daemon can now choose the Mac's LAN IPv4 at startup. It asks macOS for hardware ports and prefers wired Ethernet/LAN/Thunderbolt devices over Wi-Fi when multiple active interfaces exist.
+
+```bash
+sudo TMDNS_DNS_ADDR=auto:53 \
+  TMDNS_HTTP_ADDR=auto:8080 \
+  TMDNS_DB_PATH=/Users/techmore/projects/TM-DNS/tm-dns-dev.db \
+  TMDNS_LOG_LEVEL=debug \
+  ./tmdns
+```
+
+On the current school LAN this should bind to `192.168.222.8:53` and `192.168.222.8:8080` when that remains the active wired address. To override detection, set explicit values such as `TMDNS_DNS_ADDR=192.168.222.8:53`.
+
 ```bash
 go test ./...
 ./scripts/dev-start.sh
