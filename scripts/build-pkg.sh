@@ -45,7 +45,11 @@ xcode_args=(
 	CURRENT_PROJECT_VERSION="${VERSION//./}"
 )
 if [[ -n "${TMDNS_APP_SIGN_IDENTITY:-}" ]]; then
-	xcode_args+=(CODE_SIGN_IDENTITY="${TMDNS_APP_SIGN_IDENTITY}")
+	xcode_args+=(
+		CODE_SIGN_STYLE=Manual
+		CODE_SIGN_IDENTITY="${TMDNS_APP_SIGN_IDENTITY}"
+		DEVELOPMENT_TEAM="${TMDNS_DEVELOPMENT_TEAM:-G8D238C7EJ}"
+	)
 fi
 xcode_args+=(build)
 xcodebuild "${xcode_args[@]}"
