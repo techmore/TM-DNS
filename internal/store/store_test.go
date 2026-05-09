@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -130,6 +131,39 @@ func TestBlocklistSourceAddAndToggle(t *testing.T) {
 	}
 	if len(sources) != 1 {
 		t.Fatalf("sources len = %d, want 1", len(sources))
+	}
+}
+
+func TestParseBlocklistDomainsAndMatch(t *testing.T) {
+	input := `
+# comment
+0.0.0.0 bad.example
+||tracker.example^
+*.wild.example
+not a domain
+`
+	domains, err := parseBlocklistDomains(strings.NewReader(input), "hosts")
+	if err != nil {
+		t.Fatalf("parse blocklist: %v", err)
+	}
+	for _, domain := range []string{"bad.example.", "tracker.example.", "wild.example."} {
+		if _, ok := domains[domain]; !ok {
+			t.Fatalf("missing parsed domain %s in %#v", domain, domains)
+		}
+	}
+
+	st := testStore(t)
+	ctx := context.Background()
+	err = st.replaceBlocklistEntries(ctx, blocklistFetchSource{ID: "test", Type: "preset", Name: "Test List"}, domains)
+	if err != nil {
+		t.Fatalf("replace entries: %v", err)
+	}
+	match, err := st.MatchBlocklist(ctx, "sub.bad.example")
+	if err != nil {
+		t.Fatalf("match blocklist: %v", err)
+	}
+	if match == nil || match.SourceName != "Test List" {
+		t.Fatalf("match = %#v, want Test List", match)
 	}
 }
 

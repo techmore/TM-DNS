@@ -65,8 +65,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/blocklist-presets/", s.blocklistPresetDetail)
 	s.mux.HandleFunc("/api/blocklist-sources", s.blocklistSources)
 	s.mux.HandleFunc("/api/blocklist-sources/", s.blocklistSourceDetail)
+	s.mux.HandleFunc("/api/blocklists/refresh", s.blocklistsRefresh)
 	s.mux.HandleFunc("/api/records", s.records)
 	s.mux.HandleFunc("/api/reports/host/", s.hostReport)
+	s.mux.HandleFunc("/api/audit", s.audit)
 }
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
@@ -321,6 +323,19 @@ func (s *Server) blocklistSourceDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, source)
 }
 
+func (s *Server) blocklistsRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	results, err := s.store.RefreshBlocklists(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, results)
+}
+
 func (s *Server) records(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -358,6 +373,19 @@ func (s *Server) hostReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, report)
+}
+
+func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	events, err := s.store.AuditEvents(r.Context(), 250)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, events)
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

@@ -1,12 +1,16 @@
 package store
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -59,6 +63,21 @@ type BlocklistSource struct {
 	LastStatus  string `json:"last_status"`
 	LastChecked string `json:"last_checked"`
 	CreatedAt   string `json:"created_at"`
+}
+
+type BlocklistRefreshResult struct {
+	SourceName string `json:"source_name"`
+	URL        string `json:"url"`
+	Status     string `json:"status"`
+	Entries    int    `json:"entries"`
+	Error      string `json:"error,omitempty"`
+}
+
+type BlocklistMatch struct {
+	Domain     string `json:"domain"`
+	SourceName string `json:"source_name"`
+	SourceType string `json:"source_type"`
+	SourceID   string `json:"source_id"`
 }
 
 type QueryEvent struct {
@@ -139,6 +158,14 @@ type HostReport struct {
 	FirstEventAt     string   `json:"first_event_at"`
 	LastEventAt      string   `json:"last_event_at"`
 	RecommendedNotes []string `json:"recommended_notes"`
+}
+
+type AuditEvent struct {
+	ID        int64  `json:"id"`
+	Timestamp string `json:"timestamp"`
+	Action    string `json:"action"`
+	Target    string `json:"target"`
+	Detail    string `json:"detail"`
 }
 
 func Open(ctx context.Context, path string, logger *slog.Logger) (*Store, error) {
@@ -235,6 +262,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			last_checked TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS blocklist_entries (
+			domain TEXT NOT NULL,
+			source_type TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			source_name TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(domain, source_type, source_id)
+		);`,
 		`CREATE TABLE IF NOT EXISTS query_events (
 			id INTEGER PRIMARY KEY,
 			ts TEXT NOT NULL,
@@ -277,6 +312,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_query_events_host ON query_events(host_id, ts);`,
 		`CREATE INDEX IF NOT EXISTS idx_query_events_name ON query_events(query_name);`,
 		`CREATE INDEX IF NOT EXISTS idx_block_events_host ON block_events(host_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_blocklist_entries_domain ON blocklist_entries(domain);`,
 	}
 
 	for _, statement := range statements {
@@ -425,18 +461,43 @@ func (s *Store) MatchRule(ctx context.Context, qname string) (*Rule, error) {
 	return nil, nil
 }
 
+func (s *Store) MatchBlocklist(ctx context.Context, qname string) (*BlocklistMatch, error) {
+	qname = NormalizeName(qname)
+	for candidate := qname; candidate != ""; candidate = parentDomain(candidate) {
+		var match BlocklistMatch
+		err := s.db.QueryRowContext(ctx, `SELECT domain, source_name, source_type, source_id FROM blocklist_entries WHERE domain = ? LIMIT 1`, candidate).
+			Scan(&match.Domain, &match.SourceName, &match.SourceType, &match.SourceID)
+		if err == nil {
+			return &match, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
+func parentDomain(name string) string {
+	name = strings.TrimSuffix(name, ".")
+	idx := strings.IndexByte(name, '.')
+	if idx < 0 {
+		return ""
+	}
+	return name[idx+1:] + "."
+}
+
 func (s *Store) SeedBlocklistPresets(ctx context.Context) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	presets := []BlocklistPreset{
 		{ID: "hagezi-pro", Name: "HaGeZi Pro", Tier: "Balanced", Description: "Comprehensive ads, trackers, malware, phishing, and scam protection. Strong default candidate after testing.", HomeURL: "https://github.com/hagezi/dns-blocklists", SourceURL: "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/domains/pro.txt"},
 		{ID: "hagezi-light", Name: "HaGeZi Light", Tier: "Conservative", Description: "Lighter HaGeZi tier for lower false-positive risk while evaluating policy impact.", HomeURL: "https://github.com/hagezi/dns-blocklists", SourceURL: "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/domains/light.txt"},
 		{ID: "stevenblack", Name: "StevenBlack Unified Hosts", Tier: "Classic", Description: "Long-running aggregated hosts list. Good baseline for ads and malware with optional category variants.", HomeURL: "https://github.com/StevenBlack/hosts", SourceURL: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"},
-		{ID: "firebog", Name: "Firebog", Tier: "Collection", Description: "Curated collection of many lists, useful for comparing safer green lists against more aggressive sources.", HomeURL: "https://firebog.net/", SourceURL: "https://firebog.net/"},
-		{ID: "blocklistproject", Name: "Block List Project", Tier: "Categories", Description: "Category-specific lists for ads, malware, phishing, tracking, gambling, adult content, and more.", HomeURL: "https://blocklistproject.github.io/Lists/", SourceURL: "https://blocklistproject.github.io/Lists/"},
-		{ID: "oisd", Name: "OISD", Tier: "Low breakage", Description: "Popular optimized list focused on low false positives for ads, trackers, and malware.", HomeURL: "https://oisd.nl/", SourceURL: "https://oisd.nl/"},
-		{ID: "adguard-dns", Name: "AdGuard DNS Filters", Tier: "Vendor", Description: "Official AdGuard-maintained filters. Useful comparison source for ads and tracking coverage.", HomeURL: "https://github.com/AdguardTeam/AdGuardSDNSFilter", SourceURL: "https://github.com/AdguardTeam/AdGuardSDNSFilter"},
-		{ID: "urlhaus", Name: "URLhaus", Tier: "Security", Description: "Malware URL intelligence source for higher-risk security blocking evaluation.", HomeURL: "https://urlhaus.abuse.ch/", SourceURL: "https://urlhaus.abuse.ch/"},
-		{ID: "phishing-army", Name: "Phishing Army", Tier: "Security", Description: "Phishing-focused feed for security policy evaluation.", HomeURL: "https://phishing.army/", SourceURL: "https://phishing.army/"},
+		{ID: "firebog", Name: "Firebog", Tier: "Collection", Description: "Curated collection reference for choosing individual safer or aggressive lists. Add selected raw URLs as custom sources.", HomeURL: "https://firebog.net/", SourceURL: "https://firebog.net/"},
+		{ID: "blocklistproject", Name: "Block List Project Malware", Tier: "Categories", Description: "Category-specific malware list from Block List Project. Add other category URLs as custom sources when needed.", HomeURL: "https://blocklistproject.github.io/Lists/", SourceURL: "https://blocklistproject.github.io/Lists/malware.txt"},
+		{ID: "oisd", Name: "OISD", Tier: "Low breakage", Description: "Popular optimized list focused on low false positives for ads, trackers, and malware.", HomeURL: "https://oisd.nl/", SourceURL: "https://big.oisd.nl/domainswild"},
+		{ID: "adguard-dns", Name: "AdGuard DNS Filters", Tier: "Vendor", Description: "Official AdGuard-maintained filters. Useful comparison source for ads and tracking coverage.", HomeURL: "https://github.com/AdguardTeam/AdGuardSDNSFilter", SourceURL: "https://raw.githubusercontent.com/AdguardTeam/AdGuardSDNSFilter/master/Filters/filter.txt"},
+		{ID: "urlhaus", Name: "URLhaus", Tier: "Security", Description: "Malware URL intelligence source for higher-risk security blocking evaluation.", HomeURL: "https://urlhaus.abuse.ch/", SourceURL: "https://urlhaus.abuse.ch/downloads/hostfile/"},
+		{ID: "phishing-army", Name: "Phishing Army", Tier: "Security", Description: "Phishing-focused feed for security policy evaluation.", HomeURL: "https://phishing.army/", SourceURL: "https://phishing.army/download/phishing_army_blocklist_extended.txt"},
 	}
 	for _, preset := range presets {
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO blocklist_presets(id, name, tier, description, home_url, source_url, enabled, created_at, updated_at)
@@ -573,6 +634,183 @@ func (s *Store) blocklistSourceByURL(ctx context.Context, url string) (Blocklist
 		Scan(&source.ID, &source.Name, &source.URL, &source.Format, &enabled, &source.LastStatus, &source.LastChecked, &source.CreatedAt)
 	source.Enabled = enabled == 1
 	return source, err
+}
+
+func (s *Store) RefreshBlocklists(ctx context.Context) ([]BlocklistRefreshResult, error) {
+	sources, err := s.enabledBlocklistFetchSources(ctx)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: 45 * time.Second}
+	results := make([]BlocklistRefreshResult, 0, len(sources))
+	for _, source := range sources {
+		result := s.refreshBlocklistSource(ctx, client, source)
+		results = append(results, result)
+	}
+	_ = s.Audit(ctx, "blocklist.refresh", "all", fmt.Sprintf("%d sources", len(results)))
+	return results, nil
+}
+
+type blocklistFetchSource struct {
+	ID         string
+	Type       string
+	Name       string
+	URL        string
+	Format     string
+	CustomID   int64
+	CustomType bool
+}
+
+func (s *Store) enabledBlocklistFetchSources(ctx context.Context) ([]blocklistFetchSource, error) {
+	var out []blocklistFetchSource
+	presets, err := s.BlocklistPresets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, preset := range presets {
+		if !preset.Enabled {
+			continue
+		}
+		out = append(out, blocklistFetchSource{ID: preset.ID, Type: "preset", Name: preset.Name, URL: preset.SourceURL, Format: inferBlocklistFormat(preset.SourceURL)})
+	}
+	custom, err := s.BlocklistSources(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, source := range custom {
+		if !source.Enabled {
+			continue
+		}
+		out = append(out, blocklistFetchSource{ID: fmt.Sprintf("%d", source.ID), Type: "custom", Name: source.Name, URL: source.URL, Format: source.Format, CustomID: source.ID, CustomType: true})
+	}
+	return out, nil
+}
+
+func (s *Store) refreshBlocklistSource(ctx context.Context, client *http.Client, source blocklistFetchSource) BlocklistRefreshResult {
+	result := BlocklistRefreshResult{SourceName: source.Name, URL: source.URL}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source.URL, nil)
+	if err != nil {
+		result.Status = "invalid url"
+		result.Error = err.Error()
+		s.recordBlocklistSourceStatus(ctx, source, result)
+		return result
+	}
+	req.Header.Set("User-Agent", "TM-DNS/0.1")
+	resp, err := client.Do(req)
+	if err != nil {
+		result.Status = "fetch failed"
+		result.Error = err.Error()
+		s.recordBlocklistSourceStatus(ctx, source, result)
+		return result
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		result.Status = fmt.Sprintf("http %d", resp.StatusCode)
+		s.recordBlocklistSourceStatus(ctx, source, result)
+		return result
+	}
+	limited := io.LimitReader(resp.Body, 50*1024*1024)
+	domains, err := parseBlocklistDomains(limited, source.Format)
+	if err != nil {
+		result.Status = "parse failed"
+		result.Error = err.Error()
+		s.recordBlocklistSourceStatus(ctx, source, result)
+		return result
+	}
+	if err := s.replaceBlocklistEntries(ctx, source, domains); err != nil {
+		result.Status = "store failed"
+		result.Error = err.Error()
+		s.recordBlocklistSourceStatus(ctx, source, result)
+		return result
+	}
+	result.Status = "ok"
+	result.Entries = len(domains)
+	s.recordBlocklistSourceStatus(ctx, source, result)
+	return result
+}
+
+func (s *Store) replaceBlocklistEntries(ctx context.Context, source blocklistFetchSource, domains map[string]struct{}) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM blocklist_entries WHERE source_type = ? AND source_id = ?`, source.Type, source.ID); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO blocklist_entries(domain, source_type, source_id, source_name, updated_at) VALUES(?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for domain := range domains {
+		if _, err := stmt.ExecContext(ctx, domain, source.Type, source.ID, source.Name, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) recordBlocklistSourceStatus(ctx context.Context, source blocklistFetchSource, result BlocklistRefreshResult) {
+	if source.CustomType {
+		_, _ = s.db.ExecContext(ctx, `UPDATE blocklist_sources SET last_status = ?, last_checked = ? WHERE id = ?`, result.Status, time.Now().UTC().Format(time.RFC3339Nano), source.CustomID)
+	}
+}
+
+var domainTokenRE = regexp.MustCompile(`(?i)^([a-z0-9_*.-]+\.)+[a-z]{2,}\.?$`)
+
+func parseBlocklistDomains(r io.Reader, format string) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "[") {
+			continue
+		}
+		if strings.HasPrefix(line, "||") {
+			line = strings.TrimPrefix(line, "||")
+			if idx := strings.IndexAny(line, "^/$"); idx >= 0 {
+				line = line[:idx]
+			}
+		}
+		if strings.Contains(line, " ") || strings.Contains(line, "\t") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && (net.ParseIP(fields[0]) != nil || fields[0] == "0.0.0.0" || fields[0] == "::") {
+				line = fields[1]
+			} else {
+				line = fields[0]
+			}
+		}
+		line = strings.TrimPrefix(line, "address=/")
+		if idx := strings.Index(line, "/"); idx > 0 && strings.Contains(line[idx+1:], ".") {
+			line = line[:idx]
+		}
+		line = strings.TrimPrefix(line, "*.")
+		line = strings.TrimPrefix(line, ".")
+		line = strings.TrimSpace(line)
+		if strings.ContainsAny(line, "/:") || strings.Contains(line, "$") || strings.Contains(line, "@@") {
+			continue
+		}
+		if !domainTokenRE.MatchString(line) {
+			continue
+		}
+		if normalized := NormalizeName(line); normalized != "" {
+			out[normalized] = struct{}{}
+		}
+	}
+	return out, scanner.Err()
+}
+
+func inferBlocklistFormat(url string) string {
+	if strings.Contains(url, "AdGuard") || strings.Contains(url, "filter.txt") {
+		return "adguard"
+	}
+	if strings.Contains(url, "hosts") || strings.Contains(url, "hostfile") {
+		return "hosts"
+	}
+	return "domains"
 }
 
 func (s *Store) RecordRuleHit(ctx context.Context, id int64) {
@@ -767,6 +1005,26 @@ func (s *Store) RecentEventsByHost(ctx context.Context, hostID int64, action str
 func (s *Store) Audit(ctx context.Context, action, target, detail string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_events(ts, action, target, detail) VALUES(?, ?, ?, ?)`, time.Now().UTC().Format(time.RFC3339Nano), action, target, detail)
 	return err
+}
+
+func (s *Store) AuditEvents(ctx context.Context, limit int) ([]AuditEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, ts, action, target, detail FROM audit_events ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []AuditEvent
+	for rows.Next() {
+		var event AuditEvent
+		if err := rows.Scan(&event.ID, &event.Timestamp, &event.Action, &event.Target, &event.Detail); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 func hostReportNotes(report HostReport) []string {

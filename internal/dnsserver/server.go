@@ -152,6 +152,18 @@ func (s *Server) handleDNS(w dns.ResponseWriter, r *dns.Msg) {
 		s.logger.Warn("rule match failed", "query", qname, "error", err)
 	}
 
+	if action != "blocked" && matchedRuleID == nil {
+		if match, err := s.store.MatchBlocklist(context.Background(), qname); err == nil && match != nil {
+			action = "blocked"
+			matchedSource = match.SourceType + ":" + match.SourceName
+			s.blocked.Add(1)
+			s.addSinkholeAnswer(msg, q)
+			answerSummary = "sinkhole"
+		} else if err != nil {
+			s.logger.Warn("blocklist match failed", "query", qname, "error", err)
+		}
+	}
+
 	if action != "blocked" && len(msg.Answer) == 0 {
 		if staticAnswer, ok := s.staticAnswer(context.Background(), q); ok {
 			msg.Answer = append(msg.Answer, staticAnswer...)
