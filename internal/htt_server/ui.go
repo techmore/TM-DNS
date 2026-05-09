@@ -1,0 +1,189 @@
+package htt_server
+
+const indexHTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TM-DNS</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700;800&display=swap');
+    * { box-sizing: border-box; }
+    :root {
+      --olive-50:#f7f8f4; --olive-100:#eef0e6; --olive-200:#dde1d0; --olive-300:#c4c9b0; --olive-400:#a7ae8b;
+      --olive-500:#8a9269; --olive-600:#6e754b; --olive-700:#575d3d; --olive-800:#464a34; --olive-900:#3b3e2d; --olive-950:#1f2117;
+      --stone-50:#fafaf9; --stone-100:#f5f5f4; --stone-200:#e7e5e4; --stone-300:#d6d3d1; --stone-500:#78716c; --stone-700:#44403c; --stone-900:#1c1917;
+      --red:#c0392b; --amber:#b07d2a; --green:#5a8a5e; --blue:#4e8da3;
+      --bg:var(--olive-300); --surface:var(--olive-200); --surface2:var(--olive-100); --border:var(--olive-400); --text:var(--stone-900); --muted:var(--stone-500);
+    }
+    body { margin:0; font-family:Inter,system-ui,sans-serif; background:var(--bg); color:var(--text); font-size:14px; line-height:1.45; }
+    h1,h2,h3 { font-family:"Instrument Serif",serif; margin:0; line-height:1.1; }
+    .topnav { position:sticky; top:0; z-index:10; background:rgba(247,248,244,.88); backdrop-filter:blur(12px); border-bottom:1px solid rgba(221,225,208,.7); }
+    .topnav-inner { max-width:1280px; height:58px; margin:0 auto; padding:0 18px; display:flex; align-items:center; gap:14px; justify-content:space-between; }
+    .brand { display:flex; align-items:center; gap:10px; font-family:"Instrument Serif",serif; font-size:20px; font-weight:700; color:var(--olive-950); }
+    .brand-mark { width:30px; height:30px; display:grid; place-items:center; border-radius:7px; background:var(--olive-700); color:white; font-family:Inter,sans-serif; font-weight:800; }
+    .tabs { display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end; }
+    .tabs button { border:0; background:transparent; color:var(--stone-700); padding:7px 9px; border-radius:7px; font:600 12px Inter; cursor:pointer; }
+    .tabs button.active { background:var(--olive-700); color:white; }
+    .status { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; white-space:nowrap; }
+    .dot { width:9px; height:9px; border-radius:50%; background:var(--green); box-shadow:0 0 0 3px rgba(90,138,94,.22); }
+    .page { max-width:1280px; margin:0 auto; padding:18px; }
+    .hero { background:var(--olive-950); color:var(--olive-50); border-radius:8px; padding:18px 20px; display:grid; grid-template-columns:1.2fr 2fr; gap:18px; align-items:end; }
+    .hero h1 { font-size:36px; }
+    .hero p { color:var(--olive-300); margin:8px 0 0; max-width:620px; }
+    .metrics { display:grid; grid-template-columns:repeat(5,minmax(120px,1fr)); gap:10px; margin-top:14px; }
+    .card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px; min-width:0; }
+    .metric-label { color:var(--muted); text-transform:uppercase; letter-spacing:.07em; font-size:11px; font-weight:800; }
+    .metric-value { font-family:"Instrument Serif",serif; font-size:31px; line-height:1; margin-top:6px; }
+    .grid { display:grid; grid-template-columns:1.2fr .8fr; gap:12px; margin-top:12px; }
+    .section-title { display:flex; justify-content:space-between; align-items:end; border-bottom:1px solid var(--border); padding-bottom:8px; margin-bottom:10px; }
+    .section-title h2 { font-size:24px; }
+    .muted { color:var(--muted); }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th { color:var(--muted); text-align:left; text-transform:uppercase; letter-spacing:.06em; font-size:10px; border-bottom:1px solid var(--border); padding:7px 6px; }
+    td { border-bottom:1px solid rgba(167,174,139,.45); padding:8px 6px; vertical-align:top; }
+    tr:hover td { background:var(--olive-100); }
+    .badge { display:inline-flex; align-items:center; border-radius:999px; padding:2px 8px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.04em; }
+    .allowed,.static { background:rgba(90,138,94,.14); color:var(--green); }
+    .blocked { background:rgba(192,57,43,.14); color:var(--red); }
+    .upstream_failed { background:rgba(176,125,42,.17); color:var(--amber); }
+    .cached { background:rgba(78,141,163,.14); color:var(--blue); }
+    .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:10px; }
+    input, select { border:1px solid var(--border); background:var(--olive-50); color:var(--text); border-radius:7px; padding:8px 10px; font:inherit; min-height:36px; }
+    button.primary, button.secondary { border:0; border-radius:7px; min-height:36px; padding:8px 12px; font:700 12px Inter; cursor:pointer; }
+    button.primary { background:var(--olive-800); color:var(--olive-50); }
+    button.secondary { background:var(--surface2); color:var(--olive-900); border:1px solid var(--border); }
+    .hidden { display:none; }
+    .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+    .list { display:flex; flex-direction:column; gap:8px; }
+    .row { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+    .bar { height:8px; background:var(--olive-100); border-radius:99px; overflow:hidden; margin-top:5px; }
+    .bar span { display:block; height:100%; background:var(--olive-700); }
+    .list-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px; }
+    .source-card h3 { font-family:Inter,system-ui,sans-serif; font-size:14px; margin:0 0 5px; }
+    .source-card p { margin:0 0 10px; color:var(--muted); min-height:48px; }
+    .source-card.disabled { opacity:.68; }
+    .source-card a { color:var(--olive-800); font-weight:800; text-decoration:none; }
+    .source-card a:hover { text-decoration:underline; }
+    .source-links { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+    .source-links a { display:inline-flex; align-items:center; min-height:28px; border:1px solid var(--border); border-radius:7px; padding:4px 8px; background:var(--olive-50); font-size:12px; }
+    .switch { position:relative; display:inline-flex; align-items:center; gap:8px; cursor:pointer; font-size:12px; font-weight:800; color:var(--muted); }
+    .switch input { position:absolute; opacity:0; pointer-events:none; }
+    .slider { width:38px; height:22px; border-radius:999px; background:var(--stone-300); position:relative; transition:.16s; border:1px solid var(--border); }
+    .slider::after { content:""; position:absolute; width:16px; height:16px; left:2px; top:2px; background:white; border-radius:50%; transition:.16s; box-shadow:0 1px 2px rgba(0,0,0,.25); }
+    .switch input:checked + .slider { background:var(--olive-700); }
+    .switch input:checked + .slider::after { transform:translateX(16px); }
+    @media (max-width: 860px) { .hero,.grid { grid-template-columns:1fr; } .metrics { grid-template-columns:repeat(2,1fr); } .topnav-inner { height:auto; align-items:flex-start; padding-block:10px; flex-direction:column; } .tabs { justify-content:flex-start; } }
+  </style>
+</head>
+<body>
+  <nav class="topnav">
+    <div class="topnav-inner">
+      <div class="brand"><span class="brand-mark">DNS</span><span>TM-DNS</span><span class="status"><span class="dot"></span><span id="statusText">starting</span></span></div>
+      <div class="tabs" id="tabs"></div>
+    </div>
+  </nav>
+  <main class="page">
+    <section class="hero">
+      <div>
+        <h1>DNS Firewall</h1>
+        <p>Realtime DNS requests, host investigation, block rules, static records, and load visibility for local-first school deployments.</p>
+      </div>
+      <div class="metrics" id="metrics"></div>
+    </section>
+    <section id="view"></section>
+  </main>
+<script>
+const pages = ["Dashboard","Realtime","Blocked","Hosts","Rules","Records","Reports","Load"];
+let state = { page:"Dashboard", dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], hostReport:null };
+let blocklistPresets = [];
+const $ = s => document.querySelector(s);
+const api = async (url, opts) => {
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+};
+function fmtTime(v) { if (!v) return ""; return new Date(v).toLocaleTimeString(); }
+function badge(v) { return '<span class="badge '+v+'">'+v.replace("_"," ")+'</span>'; }
+function renderTabs() {
+  $("#tabs").innerHTML = pages.map(p => '<button class="'+(state.page===p?'active':'')+'" onclick="show(\''+p+'\')">'+p+'</button>').join("");
+}
+function renderMetrics() {
+  const d = state.dashboard?.dashboard || {};
+  const dns = state.dashboard?.dns || {};
+  $("#statusText").textContent = dns.dns_addr ? 'healthy on '+dns.dns_addr : 'loading';
+  $("#metrics").innerHTML = [
+    ["Queries Today", d.queries_today || 0],
+    ["Blocked Today", d.blocked_today || 0],
+    ["Unique Hosts", d.unique_hosts || 0],
+    ["Runtime Queries", dns.queries || 0],
+    ["Dropped Events", dns.dropped_events || 0],
+  ].map(x => '<div class="card"><div class="metric-label">'+x[0]+'</div><div class="metric-value">'+x[1]+'</div></div>').join("");
+}
+function eventsTable(events) {
+  return '<table><thead><tr><th>Time</th><th>Host</th><th>Domain</th><th>Type</th><th>Action</th><th>Rule/List</th><th>Latency</th><th>Answer</th></tr></thead><tbody>'+
+    events.map(e => '<tr><td class="mono">'+fmtTime(e.timestamp)+'</td><td>'+e.host_label+'<div class="muted mono">'+e.source_ip+'</div></td><td class="mono">'+e.query_name+'</td><td>'+e.query_type+'</td><td>'+badge(e.action)+'</td><td class="mono">'+(e.matched_source||'')+'</td><td>'+e.latency_ms+'ms</td><td class="mono">'+(e.answer_summary||e.response_code)+'</td></tr>').join("")+
+    '</tbody></table>';
+}
+function topList(rows) {
+  const max = Math.max(1, ...rows.map(r => r.count));
+  return '<div class="list">'+rows.map(r => '<div class="card"><div class="row"><strong class="mono">'+r.key+'</strong><span>'+r.count+'</span></div><div class="bar"><span style="width:'+(r.count/max*100)+'%"></span></div></div>').join("")+'</div>';
+}
+function systemCards() {
+  const s = state.dashboard?.system || {};
+  return '<div class="card" style="margin-top:12px"><div class="section-title"><h2>App Load</h2><span class="muted">process and storage</span></div><div class="metrics" style="grid-template-columns:repeat(4,minmax(120px,1fr));margin-top:0">'+
+    [['CPU', (s.cpu_percent ?? 0)+'%'], ['Memory', (s.resident_mb ?? 0)+' MB'], ['TM-DNS Storage', (s.app_storage_mb ?? 0)+' MB'], ['System Disk Used', (s.disk_used_percent ?? 0)+'%']].map(x => '<div><div class="metric-label">'+x[0]+'</div><div class="metric-value">'+x[1]+'</div></div>').join("")+
+    '</div><p class="muted mono" style="margin-bottom:0">TM-DNS: DB '+(s.db_size_mb ?? 0)+' MB · WAL '+(s.wal_size_mb ?? 0)+' MB · SHM '+(s.shm_size_mb ?? 0)+' MB</p><p class="muted mono" style="margin:4px 0 0">System disk: '+(s.disk_used_gb ?? 0)+' GB used / '+(s.disk_total_gb ?? 0)+' GB · '+(s.disk_free_gb ?? 0)+' GB free · data '+(s.data_dir||'')+'</p></div>';
+}
+function toggleSwitch(checked, onChange) {
+  return '<label class="switch"><input type="checkbox" '+(checked?'checked':'')+' onchange="'+onChange+'"><span class="slider"></span><span>'+(checked?'Enabled':'Disabled')+'</span></label>';
+}
+function blocklistCards() {
+  return '<div class="list-grid">'+blocklistPresets.map(s => '<div class="card source-card '+(s.enabled?'':'disabled')+'"><div class="row"><h3>'+s.name+'</h3>'+toggleSwitch(s.enabled, "togglePreset('"+s.id+"', this.checked)")+'</div><div class="row"><span class="badge static">'+s.tier+'</span><span class="muted mono">'+s.id+'</span></div><p>'+s.description+'</p><div class="source-links"><a href="'+s.home_url+'" target="_blank" rel="noopener noreferrer">Review</a><a href="'+s.source_url+'" target="_blank" rel="noopener noreferrer">Source</a></div></div>').join("")+'</div>';
+}
+function render() {
+  renderTabs(); renderMetrics();
+  const d = state.dashboard?.dashboard || {};
+  if (state.page === "Dashboard") $("#view").innerHTML = systemCards()+'<div class="grid"><div class="card"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div><div class="card"><div class="section-title"><h2>Top Hosts</h2></div>'+topList(d.top_hosts||[])+'</div><div class="card" style="margin-top:12px"><div class="section-title"><h2>Top Domains</h2></div>'+topList(d.top_domains||[])+'</div></div></div>';
+  if (state.page === "Realtime") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Firewall View</h2><span class="muted">auto-refreshes every 2s</span></div>'+eventsTable(state.realtime)+'</div>';
+  if (state.page === "Blocked") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Blocked Attempts</h2><span class="muted">who, what, why, when</span></div>'+eventsTable(state.blocked)+'</div>';
+  if (state.page === "Hosts") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Hosts</h2><span class="muted">identity starts with source IP</span></div><table><thead><tr><th>Host</th><th>IP</th><th>Group</th><th>First Seen</th><th>Last Seen</th><th>Queries</th><th>Blocks</th></tr></thead><tbody>'+state.hosts.map(h => '<tr><td><strong>'+(h.label||h.hostname||h.source_ip)+'</strong><div class="muted">'+h.identity_confidence+'</div></td><td class="mono">'+h.source_ip+'</td><td>'+h.group+'</td><td>'+h.first_seen+'</td><td>'+h.last_seen+'</td><td>'+h.query_count+'</td><td>'+h.block_count+'</td></tr>').join("")+'</tbody></table></div>';
+  if (state.page === "Rules") $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Rules</h2><span class="muted">firewall-style DNS policy</span></div><div class="toolbar"><input id="ruleTarget" placeholder="domain.example"><button class="primary" onclick="addRule(\'block\')">Block</button><button class="secondary" onclick="addRule(\'allow\')">Allow</button></div><table><thead><tr><th>ID</th><th>Target</th><th>Action</th><th>Status</th><th>Hits</th><th>Last Hit</th><th>Note</th></tr></thead><tbody>'+state.rules.map(r => '<tr><td>'+r.id+'</td><td class="mono">'+r.target+'</td><td>'+badge(r.action==="block"?"blocked":"allowed")+'</td><td>'+toggleSwitch(r.enabled, "toggleRule("+r.id+", this.checked)")+'</td><td>'+r.hit_count+'</td><td>'+fmtTime(r.last_hit_at)+'</td><td>'+r.note+'</td></tr>').join("")+'</tbody></table></div><div class="card"><div class="section-title"><h2>Public Blocklists</h2><span class="muted">enable later ingestion targets</span></div><p class="muted" style="margin-top:0">These toggles persist source selection for testing. Actual list fetching/enforcement is the next wiring step.</p>'+blocklistCards()+'</div></div>';
+  if (state.page === "Records") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Static Records</h2><span class="muted">local DNS records</span></div><div class="toolbar"><input id="recName" placeholder="name.test"><select id="recType"><option>A</option><option>AAAA</option><option>CNAME</option><option>TXT</option></select><input id="recValue" placeholder="value"><input id="recTTL" type="number" value="60" style="width:90px"><button class="primary" onclick="addRecord()">Save Record</button></div><table><thead><tr><th>Name</th><th>Type</th><th>Value</th><th>TTL</th></tr></thead><tbody>'+state.records.map(r => '<tr><td class="mono">'+r.name+'</td><td>'+r.type+'</td><td class="mono">'+r.value+'</td><td>'+r.ttl+'</td></tr>').join("")+'</tbody></table></div>';
+  if (state.page === "Reports") { const r = state.hostReport; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Host Report</h2><span class="muted">'+(r?.host?.label||r?.host?.source_ip||'no host yet')+'</span></div>'+(r ? '<div class="metrics" style="grid-template-columns:repeat(3,1fr);margin:0 0 12px"><div><div class="metric-label">Queries</div><div class="metric-value">'+r.total_queries+'</div></div><div><div class="metric-label">Blocked</div><div class="metric-value">'+r.total_blocked+'</div></div><div><div class="metric-label">Domains</div><div class="metric-value">'+r.unique_domains+'</div></div></div><div class="section-title"><h2>Top Domains</h2></div>'+topList(r.top_domains||[])+'<div class="section-title" style="margin-top:12px"><h2>Notes</h2></div><ul>'+r.recommended_notes.map(n => '<li>'+n+'</li>').join("")+'</ul>' : '<p class="muted">No host activity has been recorded yet.</p>')+'</div><div class="card"><div class="section-title"><h2>Policy Report</h2></div>'+topList(d.rule_hits||[])+'</div></div>'; }
+  if (state.page === "Load") { const dns = state.dashboard?.dns || {}; const sys = state.dashboard?.system || {}; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Service Load</h2></div><table><tbody>'+Object.entries(dns).map(([k,v]) => '<tr><th>'+k+'</th><td class="mono">'+JSON.stringify(v)+'</td></tr>').join("")+'</tbody></table></div><div class="card"><div class="section-title"><h2>System</h2></div><table><tbody>'+Object.entries(sys).map(([k,v]) => '<tr><th>'+k+'</th><td class="mono">'+JSON.stringify(v)+'</td></tr>').join("")+'</tbody></table></div></div>'; }
+}
+async function load() {
+  state.dashboard = await api('/api/dashboard');
+  state.realtime = await api('/api/realtime');
+  state.blocked = await api('/api/blocked');
+  state.hosts = await api('/api/hosts');
+  state.rules = await api('/api/rules');
+  state.records = await api('/api/records');
+  blocklistPresets = await api('/api/blocklist-presets');
+  state.hostReport = state.hosts.length ? await api('/api/reports/host/'+state.hosts[0].id) : null;
+  render();
+}
+function show(p) { state.page = p; render(); }
+async function addRule(action) {
+  const target = $("#ruleTarget").value;
+  await api('/api/rules/'+action, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({target, note:'created from UI'})});
+  await load();
+}
+async function toggleRule(id, enabled) {
+  await api('/api/rules/'+id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
+  await load();
+}
+async function togglePreset(id, enabled) {
+  await api('/api/blocklist-presets/'+id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
+  await load();
+}
+async function addRecord() {
+  await api('/api/records', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:$("#recName").value, type:$("#recType").value, value:$("#recValue").value, ttl:Number($("#recTTL").value||60)})});
+  await load();
+}
+load().catch(e => { $("#view").innerHTML = '<div class="card" style="margin-top:12px;color:var(--red)">'+e.message+'</div>'; });
+setInterval(() => load().catch(console.error), 2000);
+</script>
+</body>
+</html>`
