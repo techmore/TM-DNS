@@ -19,7 +19,7 @@ const indexHTML = `<!doctype html>
     body { margin:0; font-family:Inter,system-ui,sans-serif; background:var(--bg); color:var(--text); font-size:14px; line-height:1.45; }
     h1,h2,h3 { font-family:"Instrument Serif",serif; margin:0; line-height:1.1; }
     .topnav { position:sticky; top:0; z-index:10; background:rgba(247,248,244,.88); backdrop-filter:blur(12px); border-bottom:1px solid rgba(221,225,208,.7); }
-    .topnav-inner { max-width:1280px; height:58px; margin:0 auto; padding:0 18px; display:flex; align-items:center; gap:14px; justify-content:space-between; }
+    .topnav-inner { max-width:1680px; height:58px; margin:0 auto; padding:0 18px; display:flex; align-items:center; gap:14px; justify-content:space-between; }
     .brand { display:flex; align-items:center; gap:10px; font-family:"Instrument Serif",serif; font-size:20px; font-weight:700; color:var(--olive-950); }
     .brand-mark { width:30px; height:30px; display:grid; place-items:center; border-radius:7px; background:var(--olive-700); color:white; font-family:Inter,sans-serif; font-weight:800; }
     .tabs { display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end; }
@@ -27,7 +27,7 @@ const indexHTML = `<!doctype html>
     .tabs button.active { background:var(--olive-700); color:white; }
     .status { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; white-space:nowrap; }
     .dot { width:9px; height:9px; border-radius:50%; background:var(--green); box-shadow:0 0 0 3px rgba(90,138,94,.22); }
-    .page { max-width:1280px; margin:0 auto; padding:18px; }
+    .page { width:min(100%, 1840px); margin:0 auto; padding:18px; }
     .hero { background:var(--olive-950); color:var(--olive-50); border-radius:8px; padding:18px 20px; display:grid; grid-template-columns:1.2fr 2fr; gap:18px; align-items:end; }
     .hero h1 { font-size:36px; }
     .hero p { color:var(--olive-300); margin:8px 0 0; max-width:620px; }
@@ -35,13 +35,27 @@ const indexHTML = `<!doctype html>
     .card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px; min-width:0; }
     .metric-label { color:var(--muted); text-transform:uppercase; letter-spacing:.07em; font-size:11px; font-weight:800; }
     .metric-value { font-family:"Instrument Serif",serif; font-size:31px; line-height:1; margin-top:6px; }
-    .grid { display:grid; grid-template-columns:1.2fr .8fr; gap:12px; margin-top:12px; }
+    .grid { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(360px,.75fr); gap:12px; margin-top:12px; }
+    .summary-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-top:12px; }
     .section-title { display:flex; justify-content:space-between; align-items:end; border-bottom:1px solid var(--border); padding-bottom:8px; margin-bottom:10px; }
     .section-title h2 { font-size:24px; }
     .muted { color:var(--muted); }
-    table { width:100%; border-collapse:collapse; font-size:12px; }
+    .table-wrap { width:100%; overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; font-size:12px; table-layout:auto; }
+    .events-table { min-width:1420px; }
+    .events-table th:nth-child(1) { width:92px; }
+    .events-table th:nth-child(2) { width:170px; }
+    .events-table th:nth-child(3) { width:340px; }
+    .events-table th:nth-child(4) { width:58px; }
+    .events-table th:nth-child(5) { width:96px; }
+    .events-table th:nth-child(6) { width:230px; }
+    .events-table th:nth-child(7) { width:74px; }
+    .events-table th:nth-child(8) { width:auto; min-width:360px; }
     th { color:var(--muted); text-align:left; text-transform:uppercase; letter-spacing:.06em; font-size:10px; border-bottom:1px solid var(--border); padding:7px 6px; }
     td { border-bottom:1px solid rgba(167,174,139,.45); padding:8px 6px; vertical-align:top; }
+    td.answer-cell { white-space:normal; overflow-wrap:anywhere; min-width:360px; }
+    td.domain-cell, td.rule-cell { white-space:normal; overflow-wrap:anywhere; }
+    .list .row strong { min-width:0; overflow-wrap:anywhere; }
     tr:hover td { background:var(--olive-100); }
     .badge { display:inline-flex; align-items:center; border-radius:999px; padding:2px 8px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.04em; }
     .allowed,.static { background:rgba(90,138,94,.14); color:var(--green); }
@@ -50,9 +64,11 @@ const indexHTML = `<!doctype html>
     .cached { background:rgba(78,141,163,.14); color:var(--blue); }
     .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:10px; }
     input, select { border:1px solid var(--border); background:var(--olive-50); color:var(--text); border-radius:7px; padding:8px 10px; font:inherit; min-height:36px; }
-    button.primary, button.secondary { border:0; border-radius:7px; min-height:36px; padding:8px 12px; font:700 12px Inter; cursor:pointer; }
+    button.primary, button.secondary, button.danger { border:0; border-radius:7px; min-height:36px; padding:8px 12px; font:700 12px Inter; cursor:pointer; }
     button.primary { background:var(--olive-800); color:var(--olive-50); }
     button.secondary { background:var(--surface2); color:var(--olive-900); border:1px solid var(--border); }
+    button.danger { background:rgba(192,57,43,.14); color:var(--red); border:1px solid rgba(192,57,43,.35); }
+    button.compact { min-height:28px; padding:4px 8px; font-size:11px; white-space:nowrap; }
     .hidden { display:none; }
     .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
     .list { display:flex; flex-direction:column; gap:8px; }
@@ -73,7 +89,7 @@ const indexHTML = `<!doctype html>
     .slider::after { content:""; position:absolute; width:16px; height:16px; left:2px; top:2px; background:white; border-radius:50%; transition:.16s; box-shadow:0 1px 2px rgba(0,0,0,.25); }
     .switch input:checked + .slider { background:var(--olive-700); }
     .switch input:checked + .slider::after { transform:translateX(16px); }
-    @media (max-width: 860px) { .hero,.grid { grid-template-columns:1fr; } .metrics { grid-template-columns:repeat(2,1fr); } .topnav-inner { height:auto; align-items:flex-start; padding-block:10px; flex-direction:column; } .tabs { justify-content:flex-start; } }
+    @media (max-width: 860px) { .hero,.grid,.summary-grid { grid-template-columns:1fr; } .metrics { grid-template-columns:repeat(2,1fr); } .topnav-inner { height:auto; align-items:flex-start; padding-block:10px; flex-direction:column; } .tabs { justify-content:flex-start; } }
   </style>
 </head>
 <body>
@@ -94,10 +110,17 @@ const indexHTML = `<!doctype html>
     <section id="view"></section>
   </main>
 <script>
-const pages = ["Dashboard","Realtime","Blocked","Hosts","Rules","Records","Reports","Load"];
-let state = { page:"Dashboard", dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], hostReport:null };
+const pages = ["Dashboard","Realtime","Blocked","Hosts","Rules","Lists","Records","Reports","Load"];
+function pageFromHash() {
+  const raw = decodeURIComponent((window.location.hash || "").replace(/^#/, ""));
+  return pages.includes(raw) ? raw : "Dashboard";
+}
+let state = { page:pageFromHash(), dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], hostReport:null };
 let blocklistPresets = [];
+let blocklistSources = [];
 const $ = s => document.querySelector(s);
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const cleanDomain = v => String(v ?? "").trim().replace(/\.$/, "").toLowerCase();
 const api = async (url, opts) => {
   const res = await fetch(url, opts);
   if (!res.ok) throw new Error(await res.text());
@@ -121,13 +144,25 @@ function renderMetrics() {
   ].map(x => '<div class="card"><div class="metric-label">'+x[0]+'</div><div class="metric-value">'+x[1]+'</div></div>').join("");
 }
 function eventsTable(events) {
-  return '<table><thead><tr><th>Time</th><th>Host</th><th>Domain</th><th>Type</th><th>Action</th><th>Rule/List</th><th>Latency</th><th>Answer</th></tr></thead><tbody>'+
-    events.map(e => '<tr><td class="mono">'+fmtTime(e.timestamp)+'</td><td>'+e.host_label+'<div class="muted mono">'+e.source_ip+'</div></td><td class="mono">'+e.query_name+'</td><td>'+e.query_type+'</td><td>'+badge(e.action)+'</td><td class="mono">'+(e.matched_source||'')+'</td><td>'+e.latency_ms+'ms</td><td class="mono">'+(e.answer_summary||e.response_code)+'</td></tr>').join("")+
-    '</tbody></table>';
+  return '<div class="table-wrap"><table class="events-table"><thead><tr><th>Time</th><th>Host</th><th>Domain</th><th>Type</th><th>Action</th><th>Rule/List</th><th>Latency</th><th>Answer</th></tr></thead><tbody>'+
+    events.map(e => '<tr><td class="mono">'+fmtTime(e.timestamp)+'</td><td>'+e.host_label+'<div class="muted mono">'+e.source_ip+'</div></td><td class="mono domain-cell">'+e.query_name+'</td><td>'+e.query_type+'</td><td>'+badge(e.action)+'</td><td class="mono rule-cell">'+(e.matched_source||'')+'</td><td>'+e.latency_ms+'ms</td><td class="mono answer-cell">'+(e.answer_summary||e.response_code)+'</td></tr>').join("")+
+    '</tbody></table></div>';
 }
-function topList(rows) {
+function topList(rows, opts = {}) {
   const max = Math.max(1, ...rows.map(r => r.count));
-  return '<div class="list">'+rows.map(r => '<div class="card"><div class="row"><strong class="mono">'+r.key+'</strong><span>'+r.count+'</span></div><div class="bar"><span style="width:'+(r.count/max*100)+'%"></span></div></div>').join("")+'</div>';
+  return '<div class="list">'+rows.map(r => {
+    const key = cleanDomain(r.key);
+    const action = opts.block ? '<button class="danger compact" data-domain="'+esc(key)+'" onclick="blockDomain(this.dataset.domain)">Block</button>' : '';
+    return '<div class="card"><div class="row"><strong class="mono">'+esc(r.key)+'</strong><div class="row" style="gap:8px"><span>'+r.count+'</span>'+action+'</div></div><div class="bar"><span style="width:'+(r.count/max*100)+'%"></span></div></div>';
+  }).join("")+'</div>';
+}
+function topHostsList(rows) {
+  const max = Math.max(1, ...rows.map(r => r.count));
+  return '<div class="list">'+rows.map(r => {
+    const name = r.label || r.hostname || r.source_ip || r.key;
+    const dnsName = r.hostname || 'hostname not learned yet';
+    return '<div class="card"><div class="row"><div style="min-width:0"><strong class="mono">'+esc(name)+'</strong><div class="muted mono">'+esc(dnsName)+'</div><div class="muted mono">'+esc(r.source_ip || '')+'</div></div><span>'+r.count+'</span></div><div class="bar"><span style="width:'+(r.count/max*100)+'%"></span></div></div>';
+  }).join("")+'</div>';
 }
 function systemCards() {
   const s = state.dashboard?.system || {};
@@ -141,16 +176,21 @@ function toggleSwitch(checked, onChange) {
 function blocklistCards() {
   return '<div class="list-grid">'+blocklistPresets.map(s => '<div class="card source-card '+(s.enabled?'':'disabled')+'"><div class="row"><h3>'+s.name+'</h3>'+toggleSwitch(s.enabled, "togglePreset('"+s.id+"', this.checked)")+'</div><div class="row"><span class="badge static">'+s.tier+'</span><span class="muted mono">'+s.id+'</span></div><p>'+s.description+'</p><div class="source-links"><a href="'+s.home_url+'" target="_blank" rel="noopener noreferrer">Review</a><a href="'+s.source_url+'" target="_blank" rel="noopener noreferrer">Source</a></div></div>').join("")+'</div>';
 }
+function blocklistSourceCards() {
+  const cards = blocklistSources.map(s => '<div class="card source-card '+(s.enabled?'':'disabled')+'"><div class="row"><h3>'+esc(s.name)+'</h3>'+toggleSwitch(s.enabled, "toggleSource("+s.id+", this.checked)")+'</div><div class="row"><span class="badge static">'+esc(s.format)+'</span><span class="muted mono">'+esc(s.last_status||'not checked')+'</span></div><p class="mono">'+esc(s.url)+'</p></div>').join("");
+  return cards || '<p class="muted">No custom sources yet.</p>';
+}
 function render() {
   renderTabs(); renderMetrics();
   const d = state.dashboard?.dashboard || {};
-  if (state.page === "Dashboard") $("#view").innerHTML = systemCards()+'<div class="grid"><div class="card"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div><div class="card"><div class="section-title"><h2>Top Hosts</h2></div>'+topList(d.top_hosts||[])+'</div><div class="card" style="margin-top:12px"><div class="section-title"><h2>Top Domains</h2></div>'+topList(d.top_domains||[])+'</div></div></div>';
+  if (state.page === "Dashboard") $("#view").innerHTML = systemCards()+'<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Hosts</h2><span class="muted">name, DNS name, IP</span></div>'+topHostsList(d.top_hosts||[])+'</div><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">one-click policy</span></div>'+topList(d.top_domains||[], {block:true})+'</div></div>';
   if (state.page === "Realtime") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Firewall View</h2><span class="muted">auto-refreshes every 2s</span></div>'+eventsTable(state.realtime)+'</div>';
   if (state.page === "Blocked") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Blocked Attempts</h2><span class="muted">who, what, why, when</span></div>'+eventsTable(state.blocked)+'</div>';
   if (state.page === "Hosts") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Hosts</h2><span class="muted">identity starts with source IP</span></div><table><thead><tr><th>Host</th><th>IP</th><th>Group</th><th>First Seen</th><th>Last Seen</th><th>Queries</th><th>Blocks</th></tr></thead><tbody>'+state.hosts.map(h => '<tr><td><strong>'+(h.label||h.hostname||h.source_ip)+'</strong><div class="muted">'+h.identity_confidence+'</div></td><td class="mono">'+h.source_ip+'</td><td>'+h.group+'</td><td>'+h.first_seen+'</td><td>'+h.last_seen+'</td><td>'+h.query_count+'</td><td>'+h.block_count+'</td></tr>').join("")+'</tbody></table></div>';
   if (state.page === "Rules") $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Rules</h2><span class="muted">firewall-style DNS policy</span></div><div class="toolbar"><input id="ruleTarget" placeholder="domain.example"><button class="primary" onclick="addRule(\'block\')">Block</button><button class="secondary" onclick="addRule(\'allow\')">Allow</button></div><table><thead><tr><th>ID</th><th>Target</th><th>Action</th><th>Status</th><th>Hits</th><th>Last Hit</th><th>Note</th></tr></thead><tbody>'+state.rules.map(r => '<tr><td>'+r.id+'</td><td class="mono">'+r.target+'</td><td>'+badge(r.action==="block"?"blocked":"allowed")+'</td><td>'+toggleSwitch(r.enabled, "toggleRule("+r.id+", this.checked)")+'</td><td>'+r.hit_count+'</td><td>'+fmtTime(r.last_hit_at)+'</td><td>'+r.note+'</td></tr>').join("")+'</tbody></table></div><div class="card"><div class="section-title"><h2>Public Blocklists</h2><span class="muted">enable later ingestion targets</span></div><p class="muted" style="margin-top:0">These toggles persist source selection for testing. Actual list fetching/enforcement is the next wiring step.</p>'+blocklistCards()+'</div></div>';
+  if (state.page === "Lists") $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Custom Sources</h2><span class="muted">raw GitHub or public list URL</span></div><div class="toolbar"><input id="srcName" placeholder="Name"><input id="srcURL" placeholder="https://raw.githubusercontent.com/org/repo/main/domains.txt" style="min-width:360px"><select id="srcFormat"><option value="domains">domains</option><option value="hosts">hosts</option><option value="adguard">adguard</option></select><button class="primary" onclick="addSource()">Add Source</button></div><div class="list-grid">'+blocklistSourceCards()+'</div></div><div class="card"><div class="section-title"><h2>Curated Presets</h2><span class="muted">review and enable</span></div>'+blocklistCards()+'</div></div>';
   if (state.page === "Records") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Static Records</h2><span class="muted">local DNS records</span></div><div class="toolbar"><input id="recName" placeholder="name.test"><select id="recType"><option>A</option><option>AAAA</option><option>CNAME</option><option>TXT</option></select><input id="recValue" placeholder="value"><input id="recTTL" type="number" value="60" style="width:90px"><button class="primary" onclick="addRecord()">Save Record</button></div><table><thead><tr><th>Name</th><th>Type</th><th>Value</th><th>TTL</th></tr></thead><tbody>'+state.records.map(r => '<tr><td class="mono">'+r.name+'</td><td>'+r.type+'</td><td class="mono">'+r.value+'</td><td>'+r.ttl+'</td></tr>').join("")+'</tbody></table></div>';
-  if (state.page === "Reports") { const r = state.hostReport; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Host Report</h2><span class="muted">'+(r?.host?.label||r?.host?.source_ip||'no host yet')+'</span></div>'+(r ? '<div class="metrics" style="grid-template-columns:repeat(3,1fr);margin:0 0 12px"><div><div class="metric-label">Queries</div><div class="metric-value">'+r.total_queries+'</div></div><div><div class="metric-label">Blocked</div><div class="metric-value">'+r.total_blocked+'</div></div><div><div class="metric-label">Domains</div><div class="metric-value">'+r.unique_domains+'</div></div></div><div class="section-title"><h2>Top Domains</h2></div>'+topList(r.top_domains||[])+'<div class="section-title" style="margin-top:12px"><h2>Notes</h2></div><ul>'+r.recommended_notes.map(n => '<li>'+n+'</li>').join("")+'</ul>' : '<p class="muted">No host activity has been recorded yet.</p>')+'</div><div class="card"><div class="section-title"><h2>Policy Report</h2></div>'+topList(d.rule_hits||[])+'</div></div>'; }
+  if (state.page === "Reports") { const r = state.hostReport; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Host Report</h2><span class="muted">'+(r?.host?.label||r?.host?.source_ip||'no host yet')+'</span></div>'+(r ? '<div class="metrics" style="grid-template-columns:repeat(3,1fr);margin:0 0 12px"><div><div class="metric-label">Queries</div><div class="metric-value">'+r.total_queries+'</div></div><div><div class="metric-label">Blocked</div><div class="metric-value">'+r.total_blocked+'</div></div><div><div class="metric-label">Domains</div><div class="metric-value">'+r.unique_domains+'</div></div></div><div class="section-title"><h2>Top Domains</h2><span class="muted">one-click policy</span></div>'+topList(r.top_domains||[], {block:true})+'<div class="section-title" style="margin-top:12px"><h2>Notes</h2></div><ul>'+r.recommended_notes.map(n => '<li>'+n+'</li>').join("")+'</ul>' : '<p class="muted">No host activity has been recorded yet.</p>')+'</div><div class="card"><div class="section-title"><h2>Policy Report</h2></div>'+topList(d.rule_hits||[])+'</div></div>'; }
   if (state.page === "Load") { const dns = state.dashboard?.dns || {}; const sys = state.dashboard?.system || {}; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Service Load</h2></div><table><tbody>'+Object.entries(dns).map(([k,v]) => '<tr><th>'+k+'</th><td class="mono">'+JSON.stringify(v)+'</td></tr>').join("")+'</tbody></table></div><div class="card"><div class="section-title"><h2>System</h2></div><table><tbody>'+Object.entries(sys).map(([k,v]) => '<tr><th>'+k+'</th><td class="mono">'+JSON.stringify(v)+'</td></tr>').join("")+'</tbody></table></div></div>'; }
 }
 async function load() {
@@ -161,13 +201,30 @@ async function load() {
   state.rules = await api('/api/rules');
   state.records = await api('/api/records');
   blocklistPresets = await api('/api/blocklist-presets');
+  blocklistSources = await api('/api/blocklist-sources');
   state.hostReport = state.hosts.length ? await api('/api/reports/host/'+state.hosts[0].id) : null;
   render();
 }
-function show(p) { state.page = p; render(); }
+function show(p) {
+  state.page = pages.includes(p) ? p : "Dashboard";
+  if (window.location.hash !== "#"+state.page) {
+    history.replaceState(null, "", "#"+state.page);
+  }
+  render();
+}
+window.addEventListener("hashchange", () => {
+  state.page = pageFromHash();
+  render();
+});
 async function addRule(action) {
-  const target = $("#ruleTarget").value;
+  const target = cleanDomain($("#ruleTarget").value);
   await api('/api/rules/'+action, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({target, note:'created from UI'})});
+  await load();
+}
+async function blockDomain(domain) {
+  const target = cleanDomain(domain);
+  if (!target) return;
+  await api('/api/rules/block', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({target, note:'blocked from Top Domains'})});
   await load();
 }
 async function toggleRule(id, enabled) {
@@ -176,6 +233,14 @@ async function toggleRule(id, enabled) {
 }
 async function togglePreset(id, enabled) {
   await api('/api/blocklist-presets/'+id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
+  await load();
+}
+async function toggleSource(id, enabled) {
+  await api('/api/blocklist-sources/'+id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
+  await load();
+}
+async function addSource() {
+  await api('/api/blocklist-sources', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:$("#srcName").value, url:$("#srcURL").value, format:$("#srcFormat").value})});
   await load();
 }
 async function addRecord() {

@@ -50,6 +50,17 @@ type BlocklistPreset struct {
 	Enabled     bool   `json:"enabled"`
 }
 
+type BlocklistSource struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	Format      string `json:"format"`
+	Enabled     bool   `json:"enabled"`
+	LastStatus  string `json:"last_status"`
+	LastChecked string `json:"last_checked"`
+	CreatedAt   string `json:"created_at"`
+}
+
 type QueryEvent struct {
 	Timestamp     time.Time `json:"timestamp"`
 	HostID        int64     `json:"host_id"`
@@ -72,7 +83,7 @@ type Dashboard struct {
 	UniqueHosts    int64        `json:"unique_hosts"`
 	Recent         []QueryEvent `json:"recent"`
 	Blocked        []QueryEvent `json:"blocked"`
-	TopHosts       []TopRow     `json:"top_hosts"`
+	TopHosts       []TopHostRow `json:"top_hosts"`
 	TopDomains     []TopRow     `json:"top_domains"`
 	RuleHits       []TopRow     `json:"rule_hits"`
 	DatabasePath   string       `json:"database_path"`
@@ -82,6 +93,15 @@ type Dashboard struct {
 type TopRow struct {
 	Key   string `json:"key"`
 	Count int64  `json:"count"`
+}
+
+type TopHostRow struct {
+	ID       int64  `json:"id"`
+	Key      string `json:"key"`
+	SourceIP string `json:"source_ip"`
+	Label    string `json:"label"`
+	Hostname string `json:"hostname"`
+	Count    int64  `json:"count"`
 }
 
 type Host struct {
@@ -204,6 +224,16 @@ func (s *Store) migrate(ctx context.Context) error {
 			enabled INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS blocklist_sources (
+			id INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			url TEXT NOT NULL UNIQUE,
+			format TEXT NOT NULL DEFAULT 'domains',
+			enabled INTEGER NOT NULL DEFAULT 0,
+			last_status TEXT NOT NULL DEFAULT 'not checked',
+			last_checked TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS query_events (
 			id INTEGER PRIMARY KEY,
@@ -460,6 +490,91 @@ func (s *Store) SetBlocklistPresetEnabled(ctx context.Context, id string, enable
 	return preset, err
 }
 
+func (s *Store) BlocklistSources(ctx context.Context) ([]BlocklistSource, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, url, format, enabled, last_status, last_checked, created_at FROM blocklist_sources ORDER BY enabled DESC, name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sources []BlocklistSource
+	for rows.Next() {
+		var source BlocklistSource
+		var enabled int
+		if err := rows.Scan(&source.ID, &source.Name, &source.URL, &source.Format, &enabled, &source.LastStatus, &source.LastChecked, &source.CreatedAt); err != nil {
+			return nil, err
+		}
+		source.Enabled = enabled == 1
+		sources = append(sources, source)
+	}
+	return sources, rows.Err()
+}
+
+func (s *Store) AddBlocklistSource(ctx context.Context, name, url, format string) (BlocklistSource, error) {
+	name = strings.TrimSpace(name)
+	url = strings.TrimSpace(url)
+	format = strings.ToLower(strings.TrimSpace(format))
+	if name == "" {
+		name = url
+	}
+	if url == "" {
+		return BlocklistSource{}, errors.New("url is required")
+	}
+	if !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
+		return BlocklistSource{}, errors.New("url must start with http:// or https://")
+	}
+	if format == "" {
+		format = "domains"
+	}
+	if format != "domains" && format != "hosts" && format != "adguard" {
+		return BlocklistSource{}, errors.New("format must be domains, hosts, or adguard")
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO blocklist_sources(name, url, format, enabled, created_at)
+		VALUES(?, ?, ?, 1, ?)
+		ON CONFLICT(url) DO UPDATE SET name = excluded.name, format = excluded.format, enabled = 1`,
+		name, url, format, now)
+	if err != nil {
+		return BlocklistSource{}, err
+	}
+	_ = s.Audit(ctx, "blocklist.source.add", url, name)
+	return s.blocklistSourceByURL(ctx, url)
+}
+
+func (s *Store) SetBlocklistSourceEnabled(ctx context.Context, id int64, enabled bool) (BlocklistSource, error) {
+	value := 0
+	if enabled {
+		value = 1
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE blocklist_sources SET enabled = ? WHERE id = ?`, value, id)
+	if err != nil {
+		return BlocklistSource{}, err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return BlocklistSource{}, sql.ErrNoRows
+	}
+	_ = s.Audit(ctx, "blocklist.source.enabled", fmt.Sprintf("%d", id), fmt.Sprintf("%t", enabled))
+	return s.BlocklistSource(ctx, id)
+}
+
+func (s *Store) BlocklistSource(ctx context.Context, id int64) (BlocklistSource, error) {
+	var source BlocklistSource
+	var enabled int
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, url, format, enabled, last_status, last_checked, created_at FROM blocklist_sources WHERE id = ?`, id).
+		Scan(&source.ID, &source.Name, &source.URL, &source.Format, &enabled, &source.LastStatus, &source.LastChecked, &source.CreatedAt)
+	source.Enabled = enabled == 1
+	return source, err
+}
+
+func (s *Store) blocklistSourceByURL(ctx context.Context, url string) (BlocklistSource, error) {
+	var source BlocklistSource
+	var enabled int
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, url, format, enabled, last_status, last_checked, created_at FROM blocklist_sources WHERE url = ?`, url).
+		Scan(&source.ID, &source.Name, &source.URL, &source.Format, &enabled, &source.LastStatus, &source.LastChecked, &source.CreatedAt)
+	source.Enabled = enabled == 1
+	return source, err
+}
+
 func (s *Store) RecordRuleHit(ctx context.Context, id int64) {
 	_, err := s.db.ExecContext(ctx, `UPDATE rules SET hit_count = hit_count + 1, last_hit_at = ? WHERE id = ?`,
 		time.Now().UTC().Format(time.RFC3339Nano), id)
@@ -565,7 +680,7 @@ func (s *Store) Dashboard(ctx context.Context, dbPath string) (Dashboard, error)
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT host_id) FROM query_events WHERE ts >= ?`, today).Scan(&d.UniqueHosts)
 	d.Recent, _ = s.RecentEvents(ctx, "", 30)
 	d.Blocked, _ = s.RecentEvents(ctx, "blocked", 30)
-	d.TopHosts, _ = s.topRows(ctx, `SELECT COALESCE(NULLIF(h.label, ''), NULLIF(h.hostname, ''), h.source_ip), COUNT(*) FROM query_events qe JOIN hosts h ON h.id = qe.host_id WHERE qe.ts >= ? GROUP BY qe.host_id ORDER BY COUNT(*) DESC LIMIT 8`, today)
+	d.TopHosts, _ = s.topHostRows(ctx, today)
 	d.TopDomains, _ = s.topRows(ctx, `SELECT query_name, COUNT(*) FROM query_events WHERE ts >= ? GROUP BY query_name ORDER BY COUNT(*) DESC LIMIT 8`, today)
 	d.RuleHits, _ = s.topRows(ctx, `SELECT target || ' (' || action || ')', hit_count FROM rules WHERE hit_count > 0 ORDER BY hit_count DESC LIMIT 8`)
 	return d, nil
@@ -681,6 +796,28 @@ func (s *Store) topRows(ctx context.Context, query string, args ...any) ([]TopRo
 	for rows.Next() {
 		var row TopRow
 		if err := rows.Scan(&row.Key, &row.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) topHostRows(ctx context.Context, since string) ([]TopHostRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT h.id, COALESCE(NULLIF(h.label, ''), NULLIF(h.hostname, ''), h.source_ip), h.source_ip, h.label, h.hostname, COUNT(*)
+		FROM query_events qe JOIN hosts h ON h.id = qe.host_id
+		WHERE qe.ts >= ?
+		GROUP BY qe.host_id
+		ORDER BY COUNT(*) DESC
+		LIMIT 8`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TopHostRow
+	for rows.Next() {
+		var row TopHostRow
+		if err := rows.Scan(&row.ID, &row.Key, &row.SourceIP, &row.Label, &row.Hostname, &row.Count); err != nil {
 			return nil, err
 		}
 		out = append(out, row)

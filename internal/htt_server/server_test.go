@@ -92,6 +92,14 @@ func TestAPIHostReportAndRuleCreation(t *testing.T) {
 		t.Fatalf("blocklist presets status = %d body=%s", rec.Code, rec.Body.String())
 	}
 
+	req = httptest.NewRequest(http.MethodPost, "/api/blocklist-sources", strings.NewReader(`{"name":"Custom","url":"https://raw.githubusercontent.com/example/list/main/domains.txt","format":"domains"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("blocklist source create status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
 	req = httptest.NewRequest(http.MethodPatch, "/api/rules/1", strings.NewReader(`{"enabled":false}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()

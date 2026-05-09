@@ -63,6 +63,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/rules/allow", s.ruleAction("allow"))
 	s.mux.HandleFunc("/api/blocklist-presets", s.blocklistPresets)
 	s.mux.HandleFunc("/api/blocklist-presets/", s.blocklistPresetDetail)
+	s.mux.HandleFunc("/api/blocklist-sources", s.blocklistSources)
+	s.mux.HandleFunc("/api/blocklist-sources/", s.blocklistSourceDetail)
 	s.mux.HandleFunc("/api/records", s.records)
 	s.mux.HandleFunc("/api/reports/host/", s.hostReport)
 }
@@ -262,6 +264,61 @@ func (s *Server) blocklistPresetDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, preset)
+}
+
+func (s *Server) blocklistSources(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		sources, err := s.store.BlocklistSources(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, sources)
+	case http.MethodPost:
+		var body struct {
+			Name   string `json:"name"`
+			URL    string `json:"url"`
+			Format string `json:"format"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, err)
+			return
+		}
+		source, err := s.store.AddBlocklistSource(r.Context(), body.Name, body.URL, body.Format)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, source)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) blocklistSourceDetail(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/api/blocklist-sources/"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid source id", http.StatusBadRequest)
+		return
+	}
+	if r.Method != http.MethodPatch {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, err)
+		return
+	}
+	source, err := s.store.SetBlocklistSourceEnabled(r.Context(), id, body.Enabled)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, source)
 }
 
 func (s *Server) records(w http.ResponseWriter, r *http.Request) {

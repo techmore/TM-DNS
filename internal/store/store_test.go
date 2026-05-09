@@ -101,6 +101,38 @@ func TestBlocklistPresetToggle(t *testing.T) {
 	}
 }
 
+func TestBlocklistSourceAddAndToggle(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	source, err := st.AddBlocklistSource(ctx, "Custom GitHub List", "https://raw.githubusercontent.com/example/list/main/domains.txt", "domains")
+	if err != nil {
+		t.Fatalf("add blocklist source: %v", err)
+	}
+	if !source.Enabled {
+		t.Fatal("new source should be enabled")
+	}
+	if source.Format != "domains" {
+		t.Fatalf("format = %q, want domains", source.Format)
+	}
+
+	disabled, err := st.SetBlocklistSourceEnabled(ctx, source.ID, false)
+	if err != nil {
+		t.Fatalf("disable source: %v", err)
+	}
+	if disabled.Enabled {
+		t.Fatal("expected source disabled")
+	}
+
+	sources, err := st.BlocklistSources(ctx)
+	if err != nil {
+		t.Fatalf("list sources: %v", err)
+	}
+	if len(sources) != 1 {
+		t.Fatalf("sources len = %d, want 1", len(sources))
+	}
+}
+
 func TestInsertQueryEventBuildsHostDetailAndReport(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
