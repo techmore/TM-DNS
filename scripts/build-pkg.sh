@@ -34,6 +34,9 @@ mkdir -p \
 
 echo "Building TM-DNS daemon..."
 (cd "${ROOT_DIR}" && go build -trimpath -ldflags="-s -w -X github.com/techmore/tm-dns/internal/version.Version=${VERSION} -X github.com/techmore/tm-dns/internal/version.Commit=${COMMIT} -X github.com/techmore/tm-dns/internal/version.BuildTime=${BUILD_TIME}" -o "${STAGE_DIR}/Library/Application Support/TM-DNS/tmdns" ./cmd/tmdns)
+if [[ -n "${TMDNS_APP_SIGN_IDENTITY:-}" ]]; then
+	codesign --force --options runtime --timestamp --sign "${TMDNS_APP_SIGN_IDENTITY}" "${STAGE_DIR}/Library/Application Support/TM-DNS/tmdns"
+fi
 
 echo "Building TM-DNS.app..."
 xcode_args=(
@@ -46,11 +49,13 @@ xcode_args=(
 )
 if [[ -n "${TMDNS_APP_SIGN_IDENTITY:-}" ]]; then
 	xcode_args+=(
-		CODE_SIGN_STYLE=Manual
-		CODE_SIGN_IDENTITY="${TMDNS_APP_SIGN_IDENTITY}"
-		DEVELOPMENT_TEAM="${TMDNS_DEVELOPMENT_TEAM:-G8D238C7EJ}"
-	)
-fi
+			CODE_SIGN_STYLE=Manual
+			CODE_SIGN_IDENTITY="${TMDNS_APP_SIGN_IDENTITY}"
+			CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO
+			DEVELOPMENT_TEAM="${TMDNS_DEVELOPMENT_TEAM:-G8D238C7EJ}"
+			OTHER_CODE_SIGN_FLAGS=--timestamp
+		)
+	fi
 xcode_args+=(build)
 xcodebuild "${xcode_args[@]}"
 
