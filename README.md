@@ -95,12 +95,12 @@ For a live LAN resolver, the daemon can now choose the Mac's LAN IPv4 at startup
 ```bash
 sudo TMDNS_DNS_ADDR=auto:53 \
   TMDNS_HTTP_ADDR=auto:8080 \
-  TMDNS_DB_PATH=/Users/techmore/projects/TM-DNS/tm-dns-dev.db \
-  TMDNS_LOG_LEVEL=debug \
-  ./tmdns
+  TMDNS_DB_PATH="/Library/Application Support/TM-DNS/tm-dns.db" \
+  TMDNS_LOG_LEVEL=info \
+  "/Library/Application Support/TM-DNS/tmdns"
 ```
 
-On the current school LAN this should bind to `192.168.222.8:53` and `192.168.222.8:8080` when that remains the active wired address. To override detection, set explicit values such as `TMDNS_DNS_ADDR=192.168.222.8:53`.
+On a packaged install this same configuration is managed by `launchd` through `/Library/LaunchDaemons/com.techmore.tmdns.daemon.plist`, so admins normally should not run the daemon manually. To override detection, set explicit values such as `TMDNS_DNS_ADDR=192.168.222.8:53` in the LaunchDaemon plist and reload the service.
 
 ## macOS Installer Package
 
