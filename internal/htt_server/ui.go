@@ -147,7 +147,8 @@ function renderTabs() {
 function renderMetrics() {
   const d = state.dashboard?.dashboard || {};
   const dns = state.dashboard?.dns || {};
-  $("#statusText").textContent = dns.dns_addr ? 'healthy on '+dns.dns_addr : 'loading';
+  const v = state.dashboard?.version || {};
+  $("#statusText").textContent = dns.dns_addr ? 'healthy on '+dns.dns_addr+' · '+(v.version||'dev') : 'loading';
   $("#metrics").innerHTML = [
     ["Queries Today", d.queries_today || 0],
     ["Blocked Today", d.blocked_today || 0],

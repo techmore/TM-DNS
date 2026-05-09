@@ -110,6 +110,18 @@ Build a local unsigned installer package:
 ./scripts/build-pkg.sh
 ```
 
+By default the package is labeled with the build date and time:
+
+```text
+build/pkg/TM-DNS-1.0.YYYYMMDD.HHMM.pkg
+```
+
+Override it when needed:
+
+```bash
+TMDNS_VERSION=1.0.20260509.1815 ./scripts/build-pkg.sh
+```
+
 The package stages:
 
 - `/Applications/TM-DNS.app`
@@ -122,8 +134,10 @@ The installer starts the LaunchDaemon after install. The daemon runs with `TMDNS
 Install locally for testing:
 
 ```bash
-sudo installer -pkg build/pkg/TM-DNS-1.0.0.pkg -target /
+sudo installer -pkg build/pkg/TM-DNS-1.0.YYYYMMDD.HHMM.pkg -target /
 ```
+
+For GitHub-based updates, publish the signed and notarized `.pkg` as a GitHub Release asset. The safe updater path is: check the latest release metadata, compare it to the installed version shown by `/api/health`, download the `.pkg`, verify signature/notarization, then prompt the admin before running `installer`. Fully silent self-updates should wait until the package is consistently Developer ID signed and notarized.
 
 Check service state:
 

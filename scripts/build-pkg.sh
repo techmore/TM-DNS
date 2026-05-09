@@ -8,10 +8,12 @@ BUILD_DIR="${ROOT_DIR}/build/pkg"
 STAGE_DIR="${BUILD_DIR}/stage"
 SCRIPTS_DIR="${BUILD_DIR}/scripts"
 PKG_ID="com.techmore.tmdns"
-VERSION="${TMDNS_VERSION:-1.0.0}"
+VERSION="${TMDNS_VERSION:-1.0.$(date +%Y%m%d.%H%M)}"
 PKG_PATH="${BUILD_DIR}/TM-DNS-${VERSION}.pkg"
 PKG_SIGN_IDENTITY="${TMDNS_PKG_SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${TMDNS_NOTARY_PROFILE:-}"
+COMMIT="$(git -C "${ROOT_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 if [[ ! -d "${XCODE_DIR}/xcode-TM-DNS.xcodeproj" ]]; then
 	echo "Missing Xcode project at ${XCODE_DIR}" >&2
@@ -31,7 +33,7 @@ mkdir -p \
 	"${SCRIPTS_DIR}"
 
 echo "Building TM-DNS daemon..."
-(cd "${ROOT_DIR}" && go build -trimpath -ldflags="-s -w" -o "${STAGE_DIR}/Library/Application Support/TM-DNS/tmdns" ./cmd/tmdns)
+(cd "${ROOT_DIR}" && go build -trimpath -ldflags="-s -w -X github.com/techmore/tm-dns/internal/version.Version=${VERSION} -X github.com/techmore/tm-dns/internal/version.Commit=${COMMIT} -X github.com/techmore/tm-dns/internal/version.BuildTime=${BUILD_TIME}" -o "${STAGE_DIR}/Library/Application Support/TM-DNS/tmdns" ./cmd/tmdns)
 
 echo "Building TM-DNS.app..."
 xcode_args=(
@@ -40,6 +42,7 @@ xcode_args=(
 	-configuration Release
 	-derivedDataPath "${BUILD_DIR}/DerivedData"
 	CODE_SIGNING_ALLOWED="${CODE_SIGNING_ALLOWED:-NO}"
+	CURRENT_PROJECT_VERSION="${VERSION//./}"
 )
 if [[ -n "${TMDNS_APP_SIGN_IDENTITY:-}" ]]; then
 	xcode_args+=(CODE_SIGN_IDENTITY="${TMDNS_APP_SIGN_IDENTITY}")

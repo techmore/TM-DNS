@@ -20,6 +20,7 @@ import (
 	"github.com/techmore/tm-dns/internal/dnsserver"
 	"github.com/techmore/tm-dns/internal/store"
 	"github.com/techmore/tm-dns/internal/systemstats"
+	"github.com/techmore/tm-dns/internal/version"
 )
 
 type Server struct {
@@ -215,7 +216,7 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"ok": true, "dns": s.dns.Status(), "http_addr": s.cfg.HTTPAddr})
+	writeJSON(w, map[string]any{"ok": true, "dns": s.dns.Status(), "http_addr": s.cfg.HTTPAddr, "version": version.Info()})
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -224,7 +225,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, map[string]any{"dashboard": d, "dns": s.dns.Status(), "system": s.systemStats()})
+	writeJSON(w, map[string]any{"dashboard": d, "dns": s.dns.Status(), "system": s.systemStats(), "version": version.Info()})
 }
 
 func (s *Server) systemStats() systemstats.Stats {
