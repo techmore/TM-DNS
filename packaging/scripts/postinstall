@@ -22,4 +22,12 @@ if [[ -f "${plist}" ]]; then
 	launchctl kickstart -k "system/${label}"
 fi
 
+console_user="$(stat -f '%Su' /dev/console || true)"
+if [[ -n "${console_user}" && "${console_user}" != "root" && -d "/Applications/TM-DNS.app" ]]; then
+	user_uid="$(id -u "${console_user}" 2>/dev/null || true)"
+	if [[ -n "${user_uid}" ]]; then
+		launchctl asuser "${user_uid}" open -a "/Applications/TM-DNS.app" >/dev/null 2>&1 || true
+	fi
+fi
+
 exit 0
