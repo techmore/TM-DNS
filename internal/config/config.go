@@ -10,30 +10,34 @@ import (
 )
 
 type Config struct {
-	DNSAddr       string
-	HTTPAddr      string
-	DBPath        string
-	Upstream      string
-	SinkholeIPv4  string
-	SinkholeIPv6  string
-	LogLevel      string
-	QueryTimeout  time.Duration
-	EventQueueCap int
+	DNSAddr        string
+	HTTPAddr       string
+	DBPath         string
+	AdminToken     string
+	AdminTokenPath string
+	Upstream       string
+	SinkholeIPv4   string
+	SinkholeIPv6   string
+	LogLevel       string
+	QueryTimeout   time.Duration
+	EventQueueCap  int
 }
 
 func Load() Config {
 	dnsAddr := getenv("TMDNS_DNS_ADDR", "auto:53")
 	httpAddr := getenv("TMDNS_HTTP_ADDR", "auto:8080")
 	return Config{
-		DNSAddr:       ResolveBindAddr(dnsAddr),
-		HTTPAddr:      ResolveHTTPBindAddr(httpAddr),
-		DBPath:        getenv("TMDNS_DB_PATH", "tm-dns.db"),
-		Upstream:      getenv("TMDNS_UPSTREAM", "1.1.1.1:53"),
-		SinkholeIPv4:  getenv("TMDNS_SINKHOLE_IPV4", "0.0.0.0"),
-		SinkholeIPv6:  getenv("TMDNS_SINKHOLE_IPV6", "::"),
-		LogLevel:      strings.ToLower(getenv("TMDNS_LOG_LEVEL", "debug")),
-		QueryTimeout:  time.Duration(getenvInt("TMDNS_QUERY_TIMEOUT_MS", 2500)) * time.Millisecond,
-		EventQueueCap: getenvInt("TMDNS_EVENT_QUEUE_CAP", 10000),
+		DNSAddr:        ResolveBindAddr(dnsAddr),
+		HTTPAddr:       ResolveHTTPBindAddr(httpAddr),
+		DBPath:         getenv("TMDNS_DB_PATH", "tm-dns.db"),
+		AdminToken:     strings.TrimSpace(os.Getenv("TMDNS_ADMIN_TOKEN")),
+		AdminTokenPath: getenv("TMDNS_ADMIN_TOKEN_PATH", ""),
+		Upstream:       getenv("TMDNS_UPSTREAM", "1.1.1.1:53"),
+		SinkholeIPv4:   getenv("TMDNS_SINKHOLE_IPV4", "0.0.0.0"),
+		SinkholeIPv6:   getenv("TMDNS_SINKHOLE_IPV6", "::"),
+		LogLevel:       strings.ToLower(getenv("TMDNS_LOG_LEVEL", "debug")),
+		QueryTimeout:   time.Duration(getenvInt("TMDNS_QUERY_TIMEOUT_MS", 2500)) * time.Millisecond,
+		EventQueueCap:  getenvInt("TMDNS_EVENT_QUEUE_CAP", 10000),
 	}
 }
 

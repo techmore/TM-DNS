@@ -46,20 +46,23 @@ func TestAPIHostReportAndRuleCreation(t *testing.T) {
 	}
 
 	cfg := config.Config{DNSAddr: "127.0.0.1:1053", HTTPAddr: "127.0.0.1:8080", DBPath: "test.db", Upstream: "1.1.1.1:53", EventQueueCap: 10}
+	cfg.AdminToken = "test-token"
 	dns := dnsserver.New(cfg, st, logger)
 	srv := New(cfg, st, dns, logger)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/rules/block", strings.NewReader(`{"target":"newblock.test","note":"test"}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req)
+	srv.server.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("rule create status = %d body=%s", rec.Code, rec.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/reports/host/1", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec = httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req)
+	srv.server.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("host report status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -72,8 +75,9 @@ func TestAPIHostReportAndRuleCreation(t *testing.T) {
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/dashboard", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec = httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req)
+	srv.server.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dashboard status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -86,33 +90,64 @@ func TestAPIHostReportAndRuleCreation(t *testing.T) {
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/blocklist-presets", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec = httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req)
+	srv.server.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("blocklist presets status = %d body=%s", rec.Code, rec.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/api/blocklist-sources", strings.NewReader(`{"name":"Custom","url":"https://raw.githubusercontent.com/example/list/main/domains.txt","format":"domains"}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec = httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req)
+	srv.server.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("blocklist source create status = %d body=%s", rec.Code, rec.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodPatch, "/api/rules/1", strings.NewReader(`{"enabled":false}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec = httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req)
+	srv.server.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("rule toggle status = %d body=%s", rec.Code, rec.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodPatch, "/api/blocklist-presets/hagezi-pro", strings.NewReader(`{"enabled":true}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec = httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req)
+	srv.server.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("preset toggle status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAPIRequiresAuth(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	st, err := store.Open(ctx, t.TempDir()+"/auth.db", logger)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := config.Config{DNSAddr: "127.0.0.1:1053", HTTPAddr: "127.0.0.1:8080", DBPath: "test.db", Upstream: "1.1.1.1:53", EventQueueCap: 10, AdminToken: "secret"}
+	srv := New(cfg, st, dnsserver.New(cfg, st, logger), logger)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard", nil)
+	rec := httptest.NewRecorder()
+	srv.server.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("dashboard without auth status = %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"token":"secret"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.server.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }

@@ -35,6 +35,25 @@ func main() {
 		logger.Error("seed defaults", "error", err)
 		os.Exit(1)
 	}
+	if _, err := db.PurgeOldEvents(ctx); err != nil {
+		logger.Warn("retention purge failed", "error", err)
+	}
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if removed, err := db.PurgeOldEvents(context.Background()); err != nil {
+					logger.Warn("retention purge failed", "error", err)
+				} else if removed > 0 {
+					logger.Info("retention purge complete", "removed", removed)
+				}
+			}
+		}
+	}()
 
 	resolver := dnsserver.New(cfg, db, logger)
 	api := htt_server.New(cfg, db, resolver, logger)

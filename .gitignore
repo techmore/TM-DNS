@@ -1,7 +1,9 @@
 /tmdns
 *.db
+*.db.key
 *.db-shm
 *.db-wal
 *.log
+admin-token.txt
 .DS_Store
 /build/

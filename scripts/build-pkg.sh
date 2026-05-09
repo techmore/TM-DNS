@@ -10,6 +10,8 @@ SCRIPTS_DIR="${BUILD_DIR}/scripts"
 PKG_ID="com.techmore.tmdns"
 VERSION="${TMDNS_VERSION:-1.0.0}"
 PKG_PATH="${BUILD_DIR}/TM-DNS-${VERSION}.pkg"
+PKG_SIGN_IDENTITY="${TMDNS_PKG_SIGN_IDENTITY:-}"
+NOTARY_PROFILE="${TMDNS_NOTARY_PROFILE:-}"
 
 if [[ ! -d "${XCODE_DIR}/xcode-TM-DNS.xcodeproj" ]]; then
 	echo "Missing Xcode project at ${XCODE_DIR}" >&2
@@ -32,13 +34,18 @@ echo "Building TM-DNS daemon..."
 (cd "${ROOT_DIR}" && go build -trimpath -ldflags="-s -w" -o "${STAGE_DIR}/Library/Application Support/TM-DNS/tmdns" ./cmd/tmdns)
 
 echo "Building TM-DNS.app..."
-xcodebuild \
-	-project "${XCODE_DIR}/xcode-TM-DNS.xcodeproj" \
-	-scheme xcode-TM-DNS \
-	-configuration Release \
-	-derivedDataPath "${BUILD_DIR}/DerivedData" \
-	CODE_SIGNING_ALLOWED="${CODE_SIGNING_ALLOWED:-NO}" \
-	build
+xcode_args=(
+	-project "${XCODE_DIR}/xcode-TM-DNS.xcodeproj"
+	-scheme xcode-TM-DNS
+	-configuration Release
+	-derivedDataPath "${BUILD_DIR}/DerivedData"
+	CODE_SIGNING_ALLOWED="${CODE_SIGNING_ALLOWED:-NO}"
+)
+if [[ -n "${TMDNS_APP_SIGN_IDENTITY:-}" ]]; then
+	xcode_args+=(CODE_SIGN_IDENTITY="${TMDNS_APP_SIGN_IDENTITY}")
+fi
+xcode_args+=(build)
+xcodebuild "${xcode_args[@]}"
 
 APP_PATH="$(find "${BUILD_DIR}/DerivedData/Build/Products/Release" -maxdepth 1 -name 'TM-DNS.app' -type d | head -n 1)"
 if [[ -z "${APP_PATH}" ]]; then
@@ -58,12 +65,22 @@ find "${STAGE_DIR}" -name '.DS_Store' -o -name '._*' | xargs -r rm -rf
 xattr -cr "${STAGE_DIR}" 2>/dev/null || true
 
 echo "Building installer package..."
-pkgbuild \
-	--root "${STAGE_DIR}" \
-	--scripts "${SCRIPTS_DIR}" \
-	--identifier "${PKG_ID}" \
-	--version "${VERSION}" \
-	--install-location "/" \
-	"${PKG_PATH}"
+pkg_args=(
+	--root "${STAGE_DIR}"
+	--scripts "${SCRIPTS_DIR}"
+	--identifier "${PKG_ID}"
+	--version "${VERSION}"
+	--install-location "/"
+)
+if [[ -n "${PKG_SIGN_IDENTITY}" ]]; then
+	pkg_args+=(--sign "${PKG_SIGN_IDENTITY}")
+fi
+pkgbuild "${pkg_args[@]}" "${PKG_PATH}"
+
+if [[ -n "${NOTARY_PROFILE}" ]]; then
+	echo "Submitting package for notarization..."
+	xcrun notarytool submit "${PKG_PATH}" --keychain-profile "${NOTARY_PROFILE}" --wait
+	xcrun stapler staple "${PKG_PATH}"
+fi
 
 echo "Built ${PKG_PATH}"

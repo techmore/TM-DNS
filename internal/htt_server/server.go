@@ -2,9 +2,15 @@ package htt_server
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,23 +23,56 @@ import (
 )
 
 type Server struct {
-	cfg    config.Config
-	store  *store.Store
-	dns    *dnsserver.Server
-	logger *slog.Logger
-	server *http.Server
-	mux    *http.ServeMux
-	stats  *systemstats.Sampler
-	statMu sync.Mutex
-	statAt time.Time
-	stat   systemstats.Stats
+	cfg        config.Config
+	store      *store.Store
+	dns        *dnsserver.Server
+	logger     *slog.Logger
+	server     *http.Server
+	mux        *http.ServeMux
+	stats      *systemstats.Sampler
+	statMu     sync.Mutex
+	statAt     time.Time
+	stat       systemstats.Stats
+	adminToken string
 }
 
 func New(cfg config.Config, st *store.Store, dns *dnsserver.Server, logger *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: st, dns: dns, logger: logger, mux: http.NewServeMux(), stats: systemstats.NewSampler(cfg.DBPath)}
+	token, err := resolveAdminToken(cfg)
+	if err != nil {
+		logger.Error("admin token setup failed", "error", err)
+	}
+	s := &Server{cfg: cfg, store: st, dns: dns, logger: logger, mux: http.NewServeMux(), stats: systemstats.NewSampler(cfg.DBPath), adminToken: token}
 	s.routes()
-	s.server = &http.Server{Addr: cfg.HTTPAddr, Handler: logMiddleware(logger, s.mux)}
+	s.server = &http.Server{Addr: cfg.HTTPAddr, Handler: logMiddleware(logger, s.authMiddleware(s.mux))}
 	return s
+}
+
+func resolveAdminToken(cfg config.Config) (string, error) {
+	if strings.TrimSpace(cfg.AdminToken) != "" {
+		return strings.TrimSpace(cfg.AdminToken), nil
+	}
+	path := cfg.AdminTokenPath
+	if path == "" {
+		path = filepath.Join(filepath.Dir(cfg.DBPath), "admin-token.txt")
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		return strings.TrimSpace(string(data)), nil
+	}
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return "", err
+		}
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+	if err := os.WriteFile(path, []byte(token+"\n"), 0600); err != nil {
+		return "", err
+	}
+	_ = os.Chmod(path, 0600)
+	return token, nil
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -51,6 +90,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/", s.index)
+	s.mux.HandleFunc("/api/auth/status", s.authStatus)
+	s.mux.HandleFunc("/api/auth/login", s.authLogin)
+	s.mux.HandleFunc("/api/auth/logout", s.authLogout)
 	s.mux.HandleFunc("/api/health", s.health)
 	s.mux.HandleFunc("/api/dashboard", s.dashboard)
 	s.mux.HandleFunc("/api/realtime", s.realtime)
@@ -72,6 +114,95 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/settings/unifi", s.unifiSettings)
 	s.mux.HandleFunc("/api/settings/unifi/test", s.unifiTest)
 	s.mux.HandleFunc("/api/settings/unifi/import", s.unifiImport)
+	s.mux.HandleFunc("/api/settings/retention", s.retentionSettings)
+	s.mux.HandleFunc("/api/settings/retention/purge", s.retentionPurge)
+}
+
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ok, cookieAuth := s.authorized(r)
+		if s.isPublicPath(r.URL.Path) || ok {
+			if ok && cookieAuth && !sameOriginUnsafeRequest(r) {
+				http.Error(w, "invalid request origin", http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) isPublicPath(path string) bool {
+	return path == "/" || path == "/api/health" || path == "/api/auth/status" || path == "/api/auth/login"
+}
+
+func (s *Server) authorized(r *http.Request) (bool, bool) {
+	if s.adminToken == "" {
+		return false, false
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	cookieAuth := false
+	if token == "" {
+		if cookie, err := r.Cookie("tmdns_admin"); err == nil {
+			token = cookie.Value
+			cookieAuth = true
+		}
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(s.adminToken)) == 1, cookieAuth
+}
+
+func sameOriginUnsafeRequest(r *http.Request) bool {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		return true
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = r.Header.Get("Referer")
+	}
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	return err == nil && strings.EqualFold(u.Host, r.Host)
+}
+
+func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
+	ok, _ := s.authorized(r)
+	writeJSON(w, map[string]any{"authenticated": ok, "required": true})
+}
+
+func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, err)
+		return
+	}
+	if s.adminToken == "" {
+		http.Error(w, "admin token unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(body.Token)), []byte(s.adminToken)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "tmdns_admin", Value: s.adminToken, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: "tmdns_admin", Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
@@ -442,6 +573,45 @@ func (s *Server) unifiImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, result)
+}
+
+func (s *Server) retentionSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := s.store.Retention(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, settings)
+	case http.MethodPut:
+		var body store.RetentionSettings
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, err)
+			return
+		}
+		settings, err := s.store.SetRetention(r.Context(), body.Days)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, settings)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) retentionPurge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	count, err := s.store.PurgeOldEvents(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "removed": count})
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

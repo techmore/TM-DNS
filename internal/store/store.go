@@ -3,7 +3,11 @@ package store
 import (
 	"bufio"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,17 +16,29 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 type Store struct {
-	db     *sql.DB
-	logger *slog.Logger
+	db              *sql.DB
+	logger          *slog.Logger
+	secretKey       []byte
+	cacheMu         sync.RWMutex
+	rulesCache      []Rule
+	rulesLoaded     bool
+	staticCache     []StaticRecord
+	staticLoaded    bool
+	blocklistCache  map[string]BlocklistMatch
+	blocklistLoaded bool
 }
 
 type StaticRecord struct {
@@ -110,6 +126,7 @@ type Dashboard struct {
 	RuleHits       []TopRow     `json:"rule_hits"`
 	DatabasePath   string       `json:"database_path"`
 	EventStoreMode string       `json:"event_store_mode"`
+	RetentionDays  int          `json:"retention_days"`
 }
 
 type TopRow struct {
@@ -184,6 +201,11 @@ type UniFiImportResult struct {
 	Error   string `json:"error,omitempty"`
 }
 
+type RetentionSettings struct {
+	Days      int    `json:"days"`
+	LastPurge string `json:"last_purge"`
+}
+
 type uniFiClient struct {
 	IP       string
 	Hostname string
@@ -207,7 +229,12 @@ func Open(ctx context.Context, path string, logger *slog.Logger) (*Store, error)
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	s := &Store{db: db, logger: logger}
+	secretKey, err := loadSecretKey(path)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	s := &Store{db: db, logger: logger, secretKey: secretKey}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -217,6 +244,79 @@ func Open(ctx context.Context, path string, logger *slog.Logger) (*Store, error)
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+func loadSecretKey(dbPath string) ([]byte, error) {
+	keyPath := dbPath + ".key"
+	if dir := filepath.Dir(keyPath); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return nil, err
+		}
+	}
+	if data, err := os.ReadFile(keyPath); err == nil {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
+		if err != nil || len(decoded) != 32 {
+			return nil, errors.New("invalid TM-DNS secret key file")
+		}
+		return decoded, nil
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(key)+"\n"), 0600); err != nil {
+		return nil, err
+	}
+	_ = os.Chmod(keyPath, 0600)
+	return key, nil
+}
+
+func (s *Store) encryptSecret(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	block, err := aes.NewCipher(s.secretKey)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	sealed := gcm.Seal(nonce, nonce, []byte(value), nil)
+	return "enc:v1:" + base64.StdEncoding.EncodeToString(sealed), nil
+}
+
+func (s *Store) decryptSecret(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if !strings.HasPrefix(value, "enc:v1:") {
+		return value
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(value, "enc:v1:"))
+	if err != nil {
+		return ""
+	}
+	block, err := aes.NewCipher(s.secretKey)
+	if err != nil {
+		return ""
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil || len(data) < gcm.NonceSize() {
+		return ""
+	}
+	plain, err := gcm.Open(nil, data[:gcm.NonceSize()], data[gcm.NonceSize():], nil)
+	if err != nil {
+		return ""
+	}
+	return string(plain)
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -409,6 +509,13 @@ func (s *Store) SeedDefaults(ctx context.Context) error {
 }
 
 func (s *Store) StaticRecords(ctx context.Context) ([]StaticRecord, error) {
+	s.cacheMu.RLock()
+	if s.staticLoaded {
+		out := append([]StaticRecord(nil), s.staticCache...)
+		s.cacheMu.RUnlock()
+		return out, nil
+	}
+	s.cacheMu.RUnlock()
 	rows, err := s.db.QueryContext(ctx, `SELECT id, name, type, value, ttl, created_at FROM static_records ORDER BY name, type`)
 	if err != nil {
 		return nil, err
@@ -424,7 +531,14 @@ func (s *Store) StaticRecords(ctx context.Context) ([]StaticRecord, error) {
 		r.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		records = append(records, r)
 	}
-	return records, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	s.cacheMu.Lock()
+	s.staticCache = append([]StaticRecord(nil), records...)
+	s.staticLoaded = true
+	s.cacheMu.Unlock()
+	return records, nil
 }
 
 func (s *Store) UpsertStaticRecord(ctx context.Context, r StaticRecord) error {
@@ -440,10 +554,27 @@ func (s *Store) UpsertStaticRecord(ctx context.Context, r StaticRecord) error {
 		VALUES(?, ?, ?, ?, ?)
 		ON CONFLICT(name, type) DO UPDATE SET value = excluded.value, ttl = excluded.ttl`,
 		name, recordType, strings.TrimSpace(r.Value), r.TTL, time.Now().UTC().Format(time.RFC3339Nano))
+	if err == nil {
+		s.invalidateStaticCache()
+	}
 	return err
 }
 
+func (s *Store) invalidateStaticCache() {
+	s.cacheMu.Lock()
+	s.staticLoaded = false
+	s.staticCache = nil
+	s.cacheMu.Unlock()
+}
+
 func (s *Store) Rules(ctx context.Context) ([]Rule, error) {
+	s.cacheMu.RLock()
+	if s.rulesLoaded {
+		out := append([]Rule(nil), s.rulesCache...)
+		s.cacheMu.RUnlock()
+		return out, nil
+	}
+	s.cacheMu.RUnlock()
 	rows, err := s.db.QueryContext(ctx, `SELECT id, scope, target, action, enabled, expires_at, hit_count, last_hit_at, note, created_at
 		FROM rules ORDER BY enabled DESC, id ASC`)
 	if err != nil {
@@ -458,7 +589,14 @@ func (s *Store) Rules(ctx context.Context) ([]Rule, error) {
 		}
 		rules = append(rules, r)
 	}
-	return rules, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	s.cacheMu.Lock()
+	s.rulesCache = append([]Rule(nil), rules...)
+	s.rulesLoaded = true
+	s.cacheMu.Unlock()
+	return rules, nil
 }
 
 func (s *Store) AddRule(ctx context.Context, target, action, note string) (Rule, error) {
@@ -478,6 +616,7 @@ func (s *Store) AddRule(ctx context.Context, target, action, note string) (Rule,
 	if err != nil {
 		return Rule{}, err
 	}
+	s.invalidateRuleCache()
 	var id int64
 	if err := s.db.QueryRowContext(ctx, `SELECT id FROM rules WHERE scope = 'global' AND target = ? AND action = ?`, target, action).Scan(&id); err != nil {
 		return Rule{}, err
@@ -504,8 +643,16 @@ func (s *Store) SetRuleEnabled(ctx context.Context, id int64, enabled bool) (Rul
 	if affected == 0 {
 		return Rule{}, sql.ErrNoRows
 	}
+	s.invalidateRuleCache()
 	_ = s.Audit(ctx, "rule.enabled", fmt.Sprintf("%d", id), fmt.Sprintf("%t", enabled))
 	return s.Rule(ctx, id)
+}
+
+func (s *Store) invalidateRuleCache() {
+	s.cacheMu.Lock()
+	s.rulesLoaded = false
+	s.rulesCache = nil
+	s.cacheMu.Unlock()
 }
 
 func (s *Store) MatchRule(ctx context.Context, qname string) (*Rule, error) {
@@ -531,18 +678,54 @@ func (s *Store) MatchRule(ctx context.Context, qname string) (*Rule, error) {
 
 func (s *Store) MatchBlocklist(ctx context.Context, qname string) (*BlocklistMatch, error) {
 	qname = NormalizeName(qname)
+	cache, err := s.blocklistEntries(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for candidate := qname; candidate != ""; candidate = parentDomain(candidate) {
-		var match BlocklistMatch
-		err := s.db.QueryRowContext(ctx, `SELECT domain, source_name, source_type, source_id FROM blocklist_entries WHERE domain = ? LIMIT 1`, candidate).
-			Scan(&match.Domain, &match.SourceName, &match.SourceType, &match.SourceID)
-		if err == nil {
+		if match, ok := cache[candidate]; ok {
 			return &match, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
 		}
 	}
 	return nil, nil
+}
+
+func (s *Store) blocklistEntries(ctx context.Context) (map[string]BlocklistMatch, error) {
+	s.cacheMu.RLock()
+	if s.blocklistLoaded {
+		out := s.blocklistCache
+		s.cacheMu.RUnlock()
+		return out, nil
+	}
+	s.cacheMu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT domain, source_name, source_type, source_id FROM blocklist_entries`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cache := map[string]BlocklistMatch{}
+	for rows.Next() {
+		var match BlocklistMatch
+		if err := rows.Scan(&match.Domain, &match.SourceName, &match.SourceType, &match.SourceID); err != nil {
+			return nil, err
+		}
+		cache[match.Domain] = match
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	s.cacheMu.Lock()
+	s.blocklistCache = cache
+	s.blocklistLoaded = true
+	s.cacheMu.Unlock()
+	return cache, nil
+}
+
+func (s *Store) invalidateBlocklistCache() {
+	s.cacheMu.Lock()
+	s.blocklistLoaded = false
+	s.blocklistCache = nil
+	s.cacheMu.Unlock()
 }
 
 func parentDomain(name string) string {
@@ -650,6 +833,9 @@ func (s *Store) AddBlocklistSource(ctx context.Context, name, url, format string
 	}
 	if !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
 		return BlocklistSource{}, errors.New("url must start with http:// or https://")
+	}
+	if err := validatePublicHTTPURL(ctx, url); err != nil {
+		return BlocklistSource{}, err
 	}
 	if format == "" {
 		format = "domains"
@@ -817,7 +1003,11 @@ func (s *Store) replaceBlocklistEntries(ctx context.Context, source blocklistFet
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.invalidateBlocklistCache()
+	return nil
 }
 
 func (s *Store) recordBlocklistSourceStatus(ctx context.Context, source blocklistFetchSource, result BlocklistRefreshResult) {
@@ -886,7 +1076,9 @@ func (s *Store) RecordRuleHit(ctx context.Context, id int64) {
 		time.Now().UTC().Format(time.RFC3339Nano), id)
 	if err != nil {
 		s.logger.Warn("record rule hit failed", "rule_id", id, "error", err)
+		return
 	}
+	s.invalidateRuleCache()
 }
 
 func (s *Store) EnsureHost(ctx context.Context, sourceIP string) (int64, string, error) {
@@ -1081,6 +1273,7 @@ func (s *Store) Dashboard(ctx context.Context, dbPath string) (Dashboard, error)
 	var d Dashboard
 	d.DatabasePath = dbPath
 	d.EventStoreMode = "sqlite-wal"
+	d.RetentionDays = s.RetentionDays(ctx)
 	today := time.Now().Format("2006-01-02") + "T00:00:00"
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM query_events WHERE ts >= ?`, today).Scan(&d.QueriesToday)
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM query_events WHERE ts >= ? AND action = 'blocked'`, today).Scan(&d.BlockedToday)
@@ -1091,6 +1284,65 @@ func (s *Store) Dashboard(ctx context.Context, dbPath string) (Dashboard, error)
 	d.TopDomains, _ = s.topRows(ctx, `SELECT query_name, COUNT(*) FROM query_events WHERE ts >= ? GROUP BY query_name ORDER BY COUNT(*) DESC LIMIT 8`, today)
 	d.RuleHits, _ = s.topRows(ctx, `SELECT target || ' (' || action || ')', hit_count FROM rules WHERE hit_count > 0 ORDER BY hit_count DESC LIMIT 8`)
 	return d, nil
+}
+
+func (s *Store) Retention(ctx context.Context) (RetentionSettings, error) {
+	settings := RetentionSettings{Days: s.RetentionDays(ctx)}
+	_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'retention.last_purge'`).Scan(&settings.LastPurge)
+	return settings, nil
+}
+
+func (s *Store) RetentionDays(ctx context.Context) int {
+	var raw string
+	_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'retention.days'`).Scan(&raw)
+	parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || parsed < 1 {
+		return 30
+	}
+	if parsed > 3650 {
+		return 3650
+	}
+	return parsed
+}
+
+func (s *Store) SetRetention(ctx context.Context, days int) (RetentionSettings, error) {
+	if days < 1 || days > 3650 {
+		return RetentionSettings{}, errors.New("retention days must be between 1 and 3650")
+	}
+	if err := s.setSetting(ctx, "retention.days", strconv.Itoa(days)); err != nil {
+		return RetentionSettings{}, err
+	}
+	_ = s.Audit(ctx, "retention.update", "query_events", fmt.Sprintf("%d days", days))
+	return s.Retention(ctx)
+}
+
+func (s *Store) PurgeOldEvents(ctx context.Context) (int64, error) {
+	days := s.RetentionDays(ctx)
+	cutoff := time.Now().AddDate(0, 0, -days).UTC().Format(time.RFC3339Nano)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM query_events WHERE ts < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM block_events WHERE created_at < ?`, cutoff); err != nil {
+		return 0, err
+	}
+	count, _ := res.RowsAffected()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES('retention.last_purge', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, now); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if count > 0 {
+		_ = s.Audit(ctx, "retention.purge", "query_events", fmt.Sprintf("%d removed before %s", count, cutoff))
+	}
+	return count, nil
 }
 
 func (s *Store) Hosts(ctx context.Context) ([]Host, error) {
@@ -1219,7 +1471,7 @@ func (s *Store) UniFiSettings(ctx context.Context) (UniFiSettings, error) {
 	if values["unifi.site"] != "" {
 		settings.Site = values["unifi.site"]
 	}
-	settings.APIKey = values["unifi.api_key"]
+	settings.APIKey = s.decryptSecret(values["unifi.api_key"])
 	settings.HasAPIKey = settings.APIKey != ""
 	settings.LastImport = values["unifi.last_import"]
 	settings.LastStatus = values["unifi.last_status"]
@@ -1250,7 +1502,11 @@ func (s *Store) SaveUniFiSettings(ctx context.Context, settings UniFiSettings) (
 		"unifi.site":     settings.Site,
 	}
 	if settings.APIKey != "" {
-		pairs["unifi.api_key"] = settings.APIKey
+		encrypted, err := s.encryptSecret(settings.APIKey)
+		if err != nil {
+			return UniFiSettings{}, err
+		}
+		pairs["unifi.api_key"] = encrypted
 	}
 	for key, value := range pairs {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value); err != nil {
@@ -1576,6 +1832,34 @@ func firstString(raw map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func validatePublicHTTPURL(ctx context.Context, raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Hostname() == "" {
+		return errors.New("invalid url")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("url must use http or https")
+	}
+	host := parsed.Hostname()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return err
+	}
+	for _, ip := range ips {
+		if isPrivateFetchIP(ip.IP) {
+			return errors.New("custom blocklist URL must resolve to a public address")
+		}
+	}
+	return nil
+}
+
+func isPrivateFetchIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
 func (s *Store) topRows(ctx context.Context, query string, args ...any) ([]TopRow, error) {

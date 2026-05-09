@@ -209,6 +209,13 @@ func TestUniFiSettingsAndImport(t *testing.T) {
 	if saved.APIKey != "" || !saved.HasAPIKey {
 		t.Fatalf("saved settings leaked key or missed key flag: %#v", saved)
 	}
+	var rawKey string
+	if err := st.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'unifi.api_key'`).Scan(&rawKey); err != nil {
+		t.Fatalf("raw key setting: %v", err)
+	}
+	if rawKey == apiKey || !strings.HasPrefix(rawKey, "enc:v1:") {
+		t.Fatalf("api key was not encrypted at rest: %q", rawKey)
+	}
 	result, err := st.TestUniFi(ctx)
 	if err != nil {
 		t.Fatalf("test unifi: %v", err)

@@ -117,7 +117,7 @@ function pageFromHash() {
   const raw = decodeURIComponent((window.location.hash || "").replace(/^#/, ""));
   return pages.includes(raw) ? raw : "Dashboard";
 }
-let state = { page:pageFromHash(), dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], audit:[], hostReport:null, hostDetail:null, selectedHostID:null, unifi:null };
+let state = { page:pageFromHash(), authed:false, dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], audit:[], hostReport:null, hostDetail:null, selectedHostID:null, unifi:null, retention:null };
 let blocklistPresets = [];
 let blocklistSources = [];
 const $ = s => document.querySelector(s);
@@ -128,6 +128,12 @@ const api = async (url, opts) => {
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 };
+function loginView(message = "") {
+  $("#metrics").innerHTML = "";
+  $("#statusText").textContent = "login required";
+  $("#tabs").innerHTML = "";
+  $("#view").innerHTML = '<div class="card" style="margin-top:12px;max-width:620px"><div class="section-title"><h2>Admin Login</h2><span class="muted">required for LAN dashboard</span></div><div class="toolbar"><input id="adminToken" type="password" placeholder="Admin token" style="min-width:360px"><button class="primary" onclick="login()">Login</button></div><p class="muted">The token is stored on the TM-DNS Mac in <span class="mono">admin-token.txt</span> next to the database, unless <span class="mono">TMDNS_ADMIN_TOKEN</span> is set.</p>'+(message ? '<p style="color:var(--red)">'+esc(message)+'</p>' : '')+'</div>';
+}
 function fmtTime(v) { if (!v) return ""; return new Date(v).toLocaleTimeString(); }
 function badge(v) { return '<span class="badge '+v+'">'+v.replace("_"," ")+'</span>'; }
 function renderTabs() {
@@ -210,9 +216,16 @@ function render() {
   if (state.page === "Reports") { const r = state.hostReport; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Host Report</h2><span class="muted">'+(r?.host?.label||r?.host?.source_ip||'no host yet')+'</span></div>'+(r ? '<div class="metrics" style="grid-template-columns:repeat(3,1fr);margin:0 0 12px"><div><div class="metric-label">Queries</div><div class="metric-value">'+r.total_queries+'</div></div><div><div class="metric-label">Blocked</div><div class="metric-value">'+r.total_blocked+'</div></div><div><div class="metric-label">Domains</div><div class="metric-value">'+r.unique_domains+'</div></div></div><div class="section-title"><h2>Top Domains</h2><span class="muted">one-click policy</span></div>'+topList(r.top_domains||[], {block:true})+'<div class="section-title" style="margin-top:12px"><h2>Notes</h2></div><ul>'+r.recommended_notes.map(n => '<li>'+n+'</li>').join("")+'</ul>' : '<p class="muted">No host activity has been recorded yet.</p>')+'</div><div class="card"><div class="section-title"><h2>Policy Report</h2></div>'+topList(d.rule_hits||[])+'</div></div>'; }
   if (state.page === "Audit") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Audit Log</h2><span class="muted">policy, list, and admin changes</span></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead><tbody>'+state.audit.map(e => '<tr><td class="mono">'+fmtTime(e.timestamp)+'</td><td class="mono">'+esc(e.action)+'</td><td class="mono domain-cell">'+esc(e.target)+'</td><td>'+esc(e.detail)+'</td></tr>').join("")+'</tbody></table></div></div>';
   if (state.page === "Load") { const dns = state.dashboard?.dns || {}; const sys = state.dashboard?.system || {}; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Service Load</h2></div><table><tbody>'+Object.entries(dns).map(([k,v]) => '<tr><th>'+k+'</th><td class="mono">'+JSON.stringify(v)+'</td></tr>').join("")+'</tbody></table></div><div class="card"><div class="section-title"><h2>System</h2></div><table><tbody>'+Object.entries(sys).map(([k,v]) => '<tr><th>'+k+'</th><td class="mono">'+JSON.stringify(v)+'</td></tr>').join("")+'</tbody></table></div></div>'; }
-  if (state.page === "Settings") { const u = state.unifi || {}; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>UniFi Identity Import</h2><span class="muted">optional, never required</span></div><div class="toolbar"><label class="switch"><input id="unifiEnabled" type="checkbox" '+(u.enabled?'checked':'')+'><span class="slider"></span><span>Enabled</span></label></div><div class="toolbar"><input id="unifiBaseURL" placeholder="https://unifi.example.com" value="'+esc(u.base_url||'')+'" style="min-width:320px"><input id="unifiSite" placeholder="default" value="'+esc(u.site||'default')+'" style="width:130px"><input id="unifiAPIKey" type="password" placeholder="'+(u.has_api_key?'API key saved - leave blank to keep':'API key')+'" style="min-width:260px"><button class="primary" onclick="saveUniFi()">Save</button><button class="secondary" onclick="testUniFi()">Test</button><button class="secondary" onclick="importUniFi()">Import Clients</button></div><p class="muted">Create a read-only UniFi API key, enter the UniFi OS/controller URL and site name, then test before importing. This only imports client names, IPs, MACs, and vendors into host identity fields.</p><p class="muted mono">Status: '+esc(u.last_status||'not configured')+' · Last import: '+esc(u.last_import||'never')+'</p></div><div class="card"><div class="section-title"><h2>Instructions</h2></div><ol><li>In UniFi, create an API key for a read-only/admin account that can read Network clients.</li><li>Use the UniFi console URL, usually https://gateway-ip or https://unifi-host:8443.</li><li>Leave site as default unless your controller uses another site id.</li><li>Click Test. If it sees clients, click Import Clients.</li></ol><p class="muted">If a site does not use UniFi, leave this blank. PTR, Bonjour, and ARP discovery will continue to work without it.</p></div></div>'; }
+  if (state.page === "Settings") { const u = state.unifi || {}; const r = state.retention || {}; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>UniFi Identity Import</h2><span class="muted">optional, never required</span></div><div class="toolbar"><label class="switch"><input id="unifiEnabled" type="checkbox" '+(u.enabled?'checked':'')+'><span class="slider"></span><span>Enabled</span></label></div><div class="toolbar"><input id="unifiBaseURL" placeholder="https://unifi.example.com" value="'+esc(u.base_url||'')+'" style="min-width:320px"><input id="unifiSite" placeholder="default" value="'+esc(u.site||'default')+'" style="width:130px"><input id="unifiAPIKey" type="password" placeholder="'+(u.has_api_key?'API key saved - leave blank to keep':'API key')+'" style="min-width:260px"><button class="primary" onclick="saveUniFi()">Save</button><button class="secondary" onclick="testUniFi()">Test</button><button class="secondary" onclick="importUniFi()">Import Clients</button></div><p class="muted">Create a read-only UniFi API key, enter the UniFi OS/controller URL and site name, then test before importing. The key is encrypted locally before storage.</p><p class="muted mono">Status: '+esc(u.last_status||'not configured')+' · Last import: '+esc(u.last_import||'never')+'</p></div><div class="card"><div class="section-title"><h2>Retention</h2><span class="muted">query log storage</span></div><div class="toolbar"><input id="retentionDays" type="number" min="1" max="3650" value="'+esc(r.days||30)+'" style="width:120px"><button class="primary" onclick="saveRetention()">Save Days</button><button class="secondary" onclick="purgeRetention()">Purge Now</button></div><p class="muted mono">Last purge: '+esc(r.last_purge||'never')+'</p><div class="section-title" style="margin-top:12px"><h2>Instructions</h2></div><ol><li>Use the UniFi console URL, usually https://gateway-ip or https://unifi-host:8443.</li><li>Leave site as default unless your controller uses another site id.</li><li>If a site does not use UniFi, leave this blank. PTR, Bonjour, and ARP discovery continue to work.</li></ol></div></div>'; }
 }
 async function load() {
+  const auth = await api('/api/auth/status');
+  if (!auth.authenticated) {
+    state.authed = false;
+    loginView();
+    return;
+  }
+  state.authed = true;
   state.dashboard = await api('/api/dashboard');
   state.realtime = await api('/api/realtime');
   state.blocked = await api('/api/blocked');
@@ -221,12 +234,21 @@ async function load() {
   state.records = await api('/api/records');
   state.audit = await api('/api/audit');
   state.unifi = await api('/api/settings/unifi');
+  state.retention = await api('/api/settings/retention');
   blocklistPresets = await api('/api/blocklist-presets');
   blocklistSources = await api('/api/blocklist-sources');
   if (!state.selectedHostID && state.hosts.length) state.selectedHostID = state.hosts[0].id;
   state.hostDetail = state.selectedHostID ? await api('/api/hosts/'+state.selectedHostID) : null;
   state.hostReport = state.selectedHostID ? await api('/api/reports/host/'+state.selectedHostID) : null;
   render();
+}
+async function login() {
+  try {
+    await api('/api/auth/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({token:$("#adminToken").value})});
+    await load();
+  } catch(e) {
+    loginView("Invalid token");
+  }
 }
 function show(p) {
   state.page = pages.includes(p) ? p : "Dashboard";
@@ -297,8 +319,17 @@ async function importUniFi() {
   alert(result.status === 'ok' ? 'Imported '+result.updated+' of '+result.seen+' clients.' : 'UniFi import failed: '+result.error);
   await load();
 }
+async function saveRetention() {
+  state.retention = await api('/api/settings/retention', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({days:Number($("#retentionDays").value||30)})});
+  await load();
+}
+async function purgeRetention() {
+  const result = await api('/api/settings/retention/purge', {method:'POST'});
+  alert('Purged '+result.removed+' old query events.');
+  await load();
+}
 load().catch(e => { $("#view").innerHTML = '<div class="card" style="margin-top:12px;color:var(--red)">'+e.message+'</div>'; });
-setInterval(() => load().catch(console.error), 2000);
+setInterval(() => { if (state.authed) load().catch(console.error); }, 2000);
 </script>
 </body>
 </html>`
