@@ -1374,6 +1374,7 @@ func (s *Store) HostDetail(ctx context.Context, id int64) (HostDetail, error) {
 	if err != nil {
 		return HostDetail{}, err
 	}
+	since24h := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339Nano)
 	recent, err := s.RecentEventsByHost(ctx, id, "", 100)
 	if err != nil {
 		return HostDetail{}, err
@@ -1382,8 +1383,8 @@ func (s *Store) HostDetail(ctx context.Context, id int64) (HostDetail, error) {
 	if err != nil {
 		return HostDetail{}, err
 	}
-	topDomains, _ := s.topRows(ctx, `SELECT query_name, COUNT(*) FROM query_events WHERE host_id = ? GROUP BY query_name ORDER BY COUNT(*) DESC LIMIT 12`, id)
-	topActions, _ := s.topRows(ctx, `SELECT action, COUNT(*) FROM query_events WHERE host_id = ? GROUP BY action ORDER BY COUNT(*) DESC`, id)
+	topDomains, _ := s.topRows(ctx, `SELECT query_name, COUNT(*) FROM query_events WHERE host_id = ? AND ts >= ? GROUP BY query_name ORDER BY COUNT(*) DESC LIMIT 20`, id, since24h)
+	topActions, _ := s.topRows(ctx, `SELECT action, COUNT(*) FROM query_events WHERE host_id = ? AND ts >= ? GROUP BY action ORDER BY COUNT(*) DESC`, id, since24h)
 	return HostDetail{Host: host, Recent: recent, Blocked: blocked, TopDomains: topDomains, TopActions: topActions}, nil
 }
 

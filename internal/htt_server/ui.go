@@ -118,11 +118,18 @@ const indexHTML = `<!doctype html>
 <script>
 const pages = ["Dashboard","Realtime","Blocked","Hosts","Rules","Lists","Records","Reports","Audit","Load","Settings"];
 const pageLabels = {"Lists":"Block Lists"};
+let initialHostID = null;
 function pageFromHash() {
   const raw = decodeURIComponent((window.location.hash || "").replace(/^#/, ""));
+  if (raw.startsWith("Host:")) {
+    const id = Number(raw.replace("Host:", ""));
+    if (id > 0) initialHostID = id;
+    return "Host Detail";
+  }
   return pages.includes(raw) ? raw : "Dashboard";
 }
-let state = { page:pageFromHash(), authed:false, dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], audit:[], hostReport:null, hostDetail:null, selectedHostID:null, unifi:null, retention:null };
+const initialPage = pageFromHash();
+let state = { page:initialPage, authed:false, dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], audit:[], hostReport:null, hostDetail:null, selectedHostID:initialHostID, unifi:null, retention:null };
 let blocklistPresets = [];
 let blocklistSources = [];
 const $ = s => document.querySelector(s);
@@ -176,6 +183,20 @@ function renderHostInvestigation() {
     '<div class="section-title" style="margin-top:12px"><h2>Request Timeline</h2><span class="muted">latest 100 requests</span></div>'+eventsTable(detail.recent||[])+
     '<div class="section-title" style="margin-top:12px"><h2>Blocked Timeline</h2><span class="muted">filtered attempts</span></div>'+eventsTable(detail.blocked||[])+'</div>';
 }
+function renderHostDetailPage() {
+  const detail = state.hostDetail;
+  if (!detail) return '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Host Detail</h2><span class="muted">loading</span></div><p class="muted">Select a host from the Hosts page.</p></div>';
+  const h = detail.host || {};
+  const recent = detail.recent || [];
+  const lastSeen = recent.length ? fmtTime(recent[0].timestamp) : esc(h.last_seen || 'no activity');
+  return '<div class="card" style="margin-top:12px"><div class="section-title"><h2>'+hostDisplayName(h)+'</h2><span class="muted mono">'+esc(h.source_ip||'')+'</span></div>'+
+    '<div class="toolbar"><button class="secondary" onclick="show(\'Hosts\')">Back to Hosts</button><span class="muted">Live refreshes every 2 seconds while this page is open.</span></div>'+
+    '<div class="metrics" style="grid-template-columns:repeat(4,minmax(140px,1fr));margin:0 0 12px"><div><div class="metric-label">Total Queries</div><div class="metric-value">'+(h.query_count||0)+'</div></div><div><div class="metric-label">Total Blocks</div><div class="metric-value">'+(h.block_count||0)+'</div></div><div><div class="metric-label">Last Hit</div><div class="metric-value" style="font-size:24px">'+lastSeen+'</div></div><div><div class="metric-label">Identity</div><div class="metric-value" style="font-size:24px">'+esc(h.identity_confidence||'source_ip')+'</div></div></div>'+
+    '<p class="muted mono" style="margin-top:0">DNS '+esc(h.hostname||'not learned')+' · MAC '+esc(h.mac||'not learned')+(h.vendor ? ' · '+esc(h.vendor) : '')+'</p></div>'+
+    '<div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">last 24 hours, sorted by hits</span></div>'+topList(detail.top_domains||[], {block:true})+'</div>'+
+    '<div class="card"><div class="section-title"><h2>Actions</h2><span class="muted">last 24 hours</span></div>'+topList(detail.top_actions||[])+'</div></div>'+
+    '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Timeline</h2><span class="muted">most recent hits first</span></div>'+eventsTable(recent)+'</div>';
+}
 function topList(rows, opts = {}) {
   const max = Math.max(1, ...rows.map(r => r.count));
   return '<div class="list">'+rows.map(r => {
@@ -215,7 +236,8 @@ function render() {
   if (state.page === "Dashboard") $("#view").innerHTML = systemCards()+'<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Hosts</h2><span class="muted">name, DNS name, IP</span></div>'+topHostsList(d.top_hosts||[])+'</div><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">one-click policy</span></div>'+topList(d.top_domains||[], {block:true})+'</div></div>';
   if (state.page === "Realtime") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Firewall View</h2><span class="muted">auto-refreshes every 2s</span></div>'+eventsTable(state.realtime)+'</div>';
   if (state.page === "Blocked") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Blocked Attempts</h2><span class="muted">who, what, why, when</span></div>'+eventsTable(state.blocked)+'</div>';
-  if (state.page === "Hosts") $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Hosts</h2><span class="muted">click a host to investigate</span></div><div class="table-wrap"><table><thead><tr><th>Host</th><th>IP</th><th>MAC / Vendor</th><th>Identity</th><th>Last Seen</th><th>Queries</th><th>Blocks</th></tr></thead><tbody>'+state.hosts.map(h => '<tr class="clickable '+(state.selectedHostID===h.id?'selected':'')+'" onclick="selectHost('+h.id+')"><td><strong>'+esc(h.label||h.hostname||h.source_ip)+'</strong><div class="muted mono">'+esc(h.hostname||'hostname not learned yet')+'</div></td><td class="mono">'+esc(h.source_ip)+'</td><td class="mono">'+esc(h.mac||'')+'<div class="muted">'+esc(h.vendor||'')+'</div></td><td>'+esc(h.identity_confidence)+'<div class="muted mono">'+esc(h.identity_last_checked||'not checked yet')+'</div></td><td>'+h.last_seen+'</td><td>'+h.query_count+'</td><td>'+h.block_count+'</td></tr>').join("")+'</tbody></table></div></div>'+renderHostInvestigation()+'</div>';
+  if (state.page === "Hosts") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Hosts</h2><span class="muted">click a host to open its detail view</span></div><div class="table-wrap"><table><thead><tr><th>Host</th><th>IP</th><th>MAC / Vendor</th><th>Identity</th><th>Last Seen</th><th>Queries</th><th>Blocks</th></tr></thead><tbody>'+state.hosts.map(h => '<tr class="clickable '+(state.selectedHostID===h.id?'selected':'')+'" onclick="selectHost('+h.id+')"><td><strong>'+esc(h.label||h.hostname||h.source_ip)+'</strong><div class="muted mono">'+esc(h.hostname||'hostname not learned yet')+'</div></td><td class="mono">'+esc(h.source_ip)+'</td><td class="mono">'+esc(h.mac||'')+'<div class="muted">'+esc(h.vendor||'')+'</div></td><td>'+esc(h.identity_confidence)+'<div class="muted mono">'+esc(h.identity_last_checked||'not checked yet')+'</div></td><td>'+h.last_seen+'</td><td>'+h.query_count+'</td><td>'+h.block_count+'</td></tr>').join("")+'</tbody></table></div></div>';
+  if (state.page === "Host Detail") $("#view").innerHTML = renderHostDetailPage();
   if (state.page === "Rules") $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Rules</h2><span class="muted">firewall-style DNS policy</span></div><div class="toolbar"><input id="ruleTarget" placeholder="domain.example"><button class="primary" onclick="addRule(\'block\')">Block</button><button class="secondary" onclick="addRule(\'allow\')">Allow</button></div><table><thead><tr><th>ID</th><th>Target</th><th>Action</th><th>Status</th><th>Hits</th><th>Last Hit</th><th>Note</th></tr></thead><tbody>'+state.rules.map(r => '<tr><td>'+r.id+'</td><td class="mono">'+r.target+'</td><td>'+badge(r.action==="block"?"blocked":"allowed")+'</td><td>'+toggleSwitch(r.enabled, "toggleRule("+r.id+", this.checked)")+'</td><td>'+r.hit_count+'</td><td>'+fmtTime(r.last_hit_at)+'</td><td>'+r.note+'</td></tr>').join("")+'</tbody></table></div><div class="card"><div class="section-title"><h2>Public Block Lists</h2><span class="muted">enable later ingestion targets</span></div><p class="muted" style="margin-top:0">Enable block lists here, then refresh them from the Block Lists page to compile local DNS enforcement entries.</p>'+blocklistCards()+'</div></div>';
   if (state.page === "Lists") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Block Lists</h2><span class="muted">enabled block lists are enforced after refresh</span></div><div class="toolbar"><button class="primary" onclick="refreshLists()">Refresh Enabled Block Lists</button><span class="muted">Downloads, parses, and atomically swaps compiled DNS blocklist entries.</span></div></div><div class="grid"><div class="card"><div class="section-title"><h2>Custom Sources</h2><span class="muted">raw GitHub or public list URL</span></div><div class="toolbar"><input id="srcName" placeholder="Name"><input id="srcURL" placeholder="https://raw.githubusercontent.com/org/repo/main/domains.txt" style="min-width:360px"><select id="srcFormat"><option value="domains">domains</option><option value="hosts">hosts</option><option value="adguard">adguard</option></select><button class="primary" onclick="addSource()">Add Source</button></div><div class="list-grid">'+blocklistSourceCards()+'</div></div><div class="card"><div class="section-title"><h2>Curated Presets</h2><span class="muted">review and enable</span></div>'+blocklistCards()+'</div></div>';
   if (state.page === "Records") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Static Records</h2><span class="muted">local DNS records</span></div><div class="toolbar"><input id="recName" placeholder="name.test"><select id="recType"><option>A</option><option>AAAA</option><option>CNAME</option><option>TXT</option></select><input id="recValue" placeholder="value"><input id="recTTL" type="number" value="60" style="width:90px"><button class="primary" onclick="addRecord()">Save Record</button></div><table><thead><tr><th>Name</th><th>Type</th><th>Value</th><th>TTL</th></tr></thead><tbody>'+state.records.map(r => '<tr><td class="mono">'+r.name+'</td><td>'+r.type+'</td><td class="mono">'+r.value+'</td><td>'+r.ttl+'</td></tr>').join("")+'</tbody></table></div>';
@@ -243,7 +265,6 @@ async function load() {
   state.retention = await api('/api/settings/retention');
   blocklistPresets = await api('/api/blocklist-presets');
   blocklistSources = await api('/api/blocklist-sources');
-  if (!state.selectedHostID && state.hosts.length) state.selectedHostID = state.hosts[0].id;
   state.hostDetail = state.selectedHostID ? await api('/api/hosts/'+state.selectedHostID) : null;
   state.hostReport = state.selectedHostID ? await api('/api/reports/host/'+state.selectedHostID) : null;
   render();
@@ -257,13 +278,23 @@ async function login() {
   }
 }
 function show(p) {
-  state.page = pages.includes(p) ? p : "Dashboard";
-  if (window.location.hash !== "#"+state.page) {
-    history.replaceState(null, "", "#"+state.page);
+  state.page = pages.includes(p) || p === "Host Detail" ? p : "Dashboard";
+  const hash = state.page === "Host Detail" && state.selectedHostID ? "Host:"+state.selectedHostID : state.page;
+  if (window.location.hash !== "#"+hash) {
+    history.replaceState(null, "", "#"+hash);
   }
   render();
 }
-window.addEventListener("hashchange", () => {
+window.addEventListener("hashchange", async () => {
+  const raw = decodeURIComponent((window.location.hash || "").replace(/^#/, ""));
+  if (raw.startsWith("Host:")) {
+    const id = Number(raw.replace("Host:", ""));
+    if (id > 0) {
+      state.selectedHostID = id;
+      state.hostDetail = await api('/api/hosts/'+id);
+      state.hostReport = await api('/api/reports/host/'+id);
+    }
+  }
   state.page = pageFromHash();
   render();
 });
@@ -282,6 +313,8 @@ async function selectHost(id) {
   state.selectedHostID = id;
   state.hostDetail = await api('/api/hosts/'+id);
   state.hostReport = await api('/api/reports/host/'+id);
+  state.page = "Host Detail";
+  history.replaceState(null, "", "#Host:"+id);
   render();
 }
 async function toggleRule(id, enabled) {
