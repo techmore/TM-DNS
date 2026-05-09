@@ -163,11 +163,15 @@ type Host struct {
 }
 
 type HostDetail struct {
-	Host       Host         `json:"host"`
-	Recent     []QueryEvent `json:"recent"`
-	Blocked    []QueryEvent `json:"blocked"`
-	TopDomains []TopRow     `json:"top_domains"`
-	TopActions []TopRow     `json:"top_actions"`
+	Host          Host         `json:"host"`
+	WindowHours   int          `json:"window_hours"`
+	TotalQueries  int64        `json:"total_queries"`
+	TotalBlocked  int64        `json:"total_blocked"`
+	UniqueDomains int64        `json:"unique_domains"`
+	Recent        []QueryEvent `json:"recent"`
+	Blocked       []QueryEvent `json:"blocked"`
+	TopDomains    []TopRow     `json:"top_domains"`
+	TopActions    []TopRow     `json:"top_actions"`
 }
 
 type HostReport struct {
@@ -1369,23 +1373,29 @@ func (s *Store) Host(ctx context.Context, id int64) (Host, error) {
 	return host, err
 }
 
-func (s *Store) HostDetail(ctx context.Context, id int64) (HostDetail, error) {
+func (s *Store) HostDetail(ctx context.Context, id int64, hours int) (HostDetail, error) {
 	host, err := s.Host(ctx, id)
 	if err != nil {
 		return HostDetail{}, err
 	}
-	since24h := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339Nano)
-	recent, err := s.RecentEventsByHost(ctx, id, "", 100)
+	if hours != 48 {
+		hours = 24
+	}
+	since := time.Now().Add(-time.Duration(hours) * time.Hour).UTC().Format(time.RFC3339Nano)
+	recent, err := s.RecentEventsByHostSince(ctx, id, "", since, 1000)
 	if err != nil {
 		return HostDetail{}, err
 	}
-	blocked, err := s.RecentEventsByHost(ctx, id, "blocked", 100)
+	blocked, err := s.RecentEventsByHostSince(ctx, id, "blocked", since, 1000)
 	if err != nil {
 		return HostDetail{}, err
 	}
-	topDomains, _ := s.topRows(ctx, `SELECT query_name, COUNT(*) FROM query_events WHERE host_id = ? AND ts >= ? GROUP BY query_name ORDER BY COUNT(*) DESC LIMIT 20`, id, since24h)
-	topActions, _ := s.topRows(ctx, `SELECT action, COUNT(*) FROM query_events WHERE host_id = ? AND ts >= ? GROUP BY action ORDER BY COUNT(*) DESC`, id, since24h)
-	return HostDetail{Host: host, Recent: recent, Blocked: blocked, TopDomains: topDomains, TopActions: topActions}, nil
+	topDomains, _ := s.topRows(ctx, `SELECT query_name, COUNT(*) FROM query_events WHERE host_id = ? AND ts >= ? GROUP BY query_name ORDER BY COUNT(*) DESC LIMIT 50`, id, since)
+	topActions, _ := s.topRows(ctx, `SELECT action, COUNT(*) FROM query_events WHERE host_id = ? AND ts >= ? GROUP BY action ORDER BY COUNT(*) DESC`, id, since)
+	var totalQueries, totalBlocked, uniqueDomains int64
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT query_name) FROM query_events WHERE host_id = ? AND ts >= ?`, id, since).Scan(&totalQueries, &uniqueDomains)
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM query_events WHERE host_id = ? AND ts >= ? AND action = 'blocked'`, id, since).Scan(&totalBlocked)
+	return HostDetail{Host: host, WindowHours: hours, TotalQueries: totalQueries, TotalBlocked: totalBlocked, UniqueDomains: uniqueDomains, Recent: recent, Blocked: blocked, TopDomains: topDomains, TopActions: topActions}, nil
 }
 
 func (s *Store) HostReport(ctx context.Context, id int64) (HostReport, error) {
@@ -1405,11 +1415,19 @@ func (s *Store) HostReport(ctx context.Context, id int64) (HostReport, error) {
 }
 
 func (s *Store) RecentEventsByHost(ctx context.Context, hostID int64, action string, limit int) ([]QueryEvent, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
+	return s.RecentEventsByHostSince(ctx, hostID, action, "", limit)
+}
+
+func (s *Store) RecentEventsByHostSince(ctx context.Context, hostID int64, action, since string, limit int) ([]QueryEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
 	}
 	where := "WHERE qe.host_id = ?"
 	args := []any{hostID}
+	if since != "" {
+		where += " AND qe.ts >= ?"
+		args = append(args, since)
+	}
 	if action != "" {
 		where += " AND qe.action = ?"
 		args = append(args, action)

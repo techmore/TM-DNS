@@ -291,7 +291,8 @@ func (s *Server) hostDetail(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true})
 		return
 	}
-	detail, err := s.store.HostDetail(r.Context(), id)
+	hours, _ := strconv.Atoi(r.URL.Query().Get("hours"))
+	detail, err := s.store.HostDetail(r.Context(), id, hours)
 	if err != nil {
 		writeError(w, err)
 		return

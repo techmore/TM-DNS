@@ -321,7 +321,7 @@ func TestInsertQueryEventBuildsHostDetailAndReport(t *testing.T) {
 		t.Fatalf("insert allowed event: %v", err)
 	}
 
-	detail, err := st.HostDetail(ctx, hostID)
+	detail, err := st.HostDetail(ctx, hostID, 24)
 	if err != nil {
 		t.Fatalf("host detail: %v", err)
 	}
@@ -330,6 +330,9 @@ func TestInsertQueryEventBuildsHostDetailAndReport(t *testing.T) {
 	}
 	if len(detail.Recent) != 2 || len(detail.Blocked) != 1 {
 		t.Fatalf("detail lengths recent=%d blocked=%d", len(detail.Recent), len(detail.Blocked))
+	}
+	if detail.TotalQueries != 2 || detail.TotalBlocked != 1 || detail.UniqueDomains != 2 {
+		t.Fatalf("detail totals = queries %d blocks %d domains %d", detail.TotalQueries, detail.TotalBlocked, detail.UniqueDomains)
 	}
 
 	report, err := st.HostReport(ctx, hostID)
