@@ -1,9 +1,13 @@
 package systemstats
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,7 +27,17 @@ type Stats struct {
 	DiskUsedGB       float64 `json:"disk_used_gb"`
 	DiskFreeGB       float64 `json:"disk_free_gb"`
 	DiskUsedPercent  float64 `json:"disk_used_percent"`
+	Power            Power   `json:"power"`
 	SampleWindowSecs float64 `json:"sample_window_secs"`
+}
+
+type Power struct {
+	Supported          bool   `json:"supported"`
+	SleepConfigured    bool   `json:"sleep_configured"`
+	SystemSleepMinutes int    `json:"system_sleep_minutes"`
+	Profile            string `json:"profile"`
+	Status             string `json:"status"`
+	Detail             string `json:"detail"`
 }
 
 type Sampler struct {
@@ -89,8 +103,64 @@ func (s *Sampler) Snapshot() Stats {
 		DiskUsedGB:       round(bytesToGB(used)),
 		DiskFreeGB:       round(bytesToGB(free)),
 		DiskUsedPercent:  round(usedPct),
+		Power:            powerSettings(),
 		SampleWindowSecs: round(window),
 	}
+}
+
+func powerSettings() Power {
+	if runtime.GOOS != "darwin" {
+		return Power{Supported: false, Status: "unsupported", Detail: "Power sleep inspection is only available on macOS."}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "pmset", "-g", "custom").CombinedOutput()
+	if err != nil {
+		return Power{Supported: true, Status: "unknown", Detail: strings.TrimSpace(string(out))}
+	}
+	return parsePMSetCustom(string(out))
+}
+
+func parsePMSetCustom(out string) Power {
+	power := Power{Supported: true, Status: "ok", Detail: "System sleep is disabled."}
+	profile := ""
+	bestSleep := 0
+	foundSleep := false
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasSuffix(trimmed, "Power:") {
+			profile = strings.TrimSuffix(trimmed, ":")
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 || fields[0] != "sleep" {
+			continue
+		}
+		minutes, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		foundSleep = true
+		if minutes > 0 && (!power.SleepConfigured || minutes < bestSleep || bestSleep == 0) {
+			bestSleep = minutes
+			power.Profile = profile
+		}
+	}
+	if !foundSleep {
+		power.Status = "unknown"
+		power.Detail = "Could not find system sleep settings in pmset output."
+		return power
+	}
+	if bestSleep > 0 {
+		power.SleepConfigured = true
+		power.SystemSleepMinutes = bestSleep
+		power.Status = "warning"
+		power.Detail = "System sleep is enabled. This Mac can stop answering DNS requests if it sleeps."
+	}
+	return power
 }
 
 func processCPUSeconds() float64 {

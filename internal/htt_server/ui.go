@@ -70,6 +70,7 @@ const indexHTML = `<!doctype html>
     button.primary { background:var(--olive-100); color:var(--olive-950); border:1px solid var(--olive-600); }
     button.secondary { background:var(--surface2); color:var(--olive-900); border:1px solid var(--border); }
     button.danger { background:rgba(192,57,43,.14); color:var(--red); border:1px solid rgba(192,57,43,.35); }
+    .button-link { display:inline-flex; align-items:center; min-height:36px; padding:8px 12px; border-radius:7px; background:var(--olive-100); color:var(--olive-950); border:1px solid var(--olive-600); font:700 12px Inter; text-decoration:none; }
     button.compact { min-height:28px; padding:4px 8px; font-size:11px; white-space:nowrap; }
     .hidden { display:none; }
     .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
@@ -164,6 +165,11 @@ function renderMetrics() {
     ["Dropped Events", dns.dropped_events || 0],
   ].map(x => '<div class="card"><div class="metric-label">'+x[0]+'</div><div class="metric-value">'+x[1]+'</div></div>').join("");
 }
+function applianceWarning() {
+  const p = state.dashboard?.system?.power || {};
+  if (!p.supported || !p.sleep_configured) return "";
+  return '<div class="card" style="margin-top:12px;border-color:rgba(176,125,42,.55);background:#eee5d1"><div class="section-title"><h2>Appliance Mode Warning</h2><span class="muted mono">'+esc(p.profile||'power')+'</span></div><p style="margin-top:0;color:var(--stone-900)">This Mac is still configured to sleep after '+esc(p.system_sleep_minutes)+' minutes. If it sleeps, TM-DNS can stop answering DNS for the network.</p><div class="toolbar"><a class="button-link" href="x-apple.systempreferences:com.apple.Battery-Settings.extension">Open macOS Power Settings</a><span class="muted mono">Terminal: sudo pmset -a sleep 0</span></div></div>';
+}
 function eventsTable(events) {
   return '<div class="table-wrap"><table class="events-table"><thead><tr><th>Time</th><th>Host</th><th>Domain</th><th>Type</th><th>Action</th><th>Rule/List</th><th>Latency</th><th>Answer</th></tr></thead><tbody>'+
     events.map(e => '<tr><td class="mono">'+fmtTime(e.timestamp)+'</td><td>'+e.host_label+'<div class="muted mono">'+e.source_ip+'</div></td><td class="mono domain-cell">'+e.query_name+'</td><td>'+e.query_type+'</td><td>'+badge(e.action)+'</td><td class="mono rule-cell">'+(e.matched_source||'')+'</td><td>'+e.latency_ms+'ms</td><td class="mono answer-cell">'+(e.answer_summary||e.response_code)+'</td></tr>').join("")+
@@ -233,7 +239,7 @@ function blocklistSourceCards() {
 function render() {
   renderTabs(); renderMetrics();
   const d = state.dashboard?.dashboard || {};
-  if (state.page === "Dashboard") $("#view").innerHTML = systemCards()+'<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Hosts</h2><span class="muted">name, DNS name, IP</span></div>'+topHostsList(d.top_hosts||[])+'</div><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">one-click policy</span></div>'+topList(d.top_domains||[], {block:true})+'</div></div>';
+  if (state.page === "Dashboard") $("#view").innerHTML = applianceWarning()+systemCards()+'<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Hosts</h2><span class="muted">name, DNS name, IP</span></div>'+topHostsList(d.top_hosts||[])+'</div><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">one-click policy</span></div>'+topList(d.top_domains||[], {block:true})+'</div></div>';
   if (state.page === "Realtime") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Firewall View</h2><span class="muted">auto-refreshes every 2s</span></div>'+eventsTable(state.realtime)+'</div>';
   if (state.page === "Blocked") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Blocked Attempts</h2><span class="muted">who, what, why, when</span></div>'+eventsTable(state.blocked)+'</div>';
   if (state.page === "Hosts") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Hosts</h2><span class="muted">click a host to open its detail view</span></div><div class="table-wrap"><table><thead><tr><th>Host</th><th>IP</th><th>MAC / Vendor</th><th>Identity</th><th>Last Seen</th><th>Queries</th><th>Blocks</th></tr></thead><tbody>'+state.hosts.map(h => '<tr class="clickable '+(state.selectedHostID===h.id?'selected':'')+'" onclick="selectHost('+h.id+')"><td><strong>'+esc(h.label||h.hostname||h.source_ip)+'</strong><div class="muted mono">'+esc(h.hostname||'hostname not learned yet')+'</div></td><td class="mono">'+esc(h.source_ip)+'</td><td class="mono">'+esc(h.mac||'')+'<div class="muted">'+esc(h.vendor||'')+'</div></td><td>'+esc(h.identity_confidence)+'<div class="muted mono">'+esc(h.identity_last_checked||'not checked yet')+'</div></td><td>'+h.last_seen+'</td><td>'+h.query_count+'</td><td>'+h.block_count+'</td></tr>').join("")+'</tbody></table></div></div>';
