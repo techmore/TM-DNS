@@ -9,6 +9,13 @@ func TestResolveBindAddrKeepsExplicitAddress(t *testing.T) {
 	}
 }
 
+func TestResolveHTTPBindAddrAutoBindsAllInterfaces(t *testing.T) {
+	got := ResolveHTTPBindAddr("auto:8080")
+	if got != "0.0.0.0:8080" {
+		t.Fatalf("ResolveHTTPBindAddr auto = %q", got)
+	}
+}
+
 func TestParseNetworkSetupHardwarePorts(t *testing.T) {
 	ports := parseNetworkSetupHardwarePorts(`Hardware Port: Ethernet
 Device: en0

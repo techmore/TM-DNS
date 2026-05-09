@@ -26,7 +26,7 @@ func Load() Config {
 	httpAddr := getenv("TMDNS_HTTP_ADDR", "auto:8080")
 	return Config{
 		DNSAddr:       ResolveBindAddr(dnsAddr),
-		HTTPAddr:      ResolveBindAddr(httpAddr),
+		HTTPAddr:      ResolveHTTPBindAddr(httpAddr),
 		DBPath:        getenv("TMDNS_DB_PATH", "tm-dns.db"),
 		Upstream:      getenv("TMDNS_UPSTREAM", "1.1.1.1:53"),
 		SinkholeIPv4:  getenv("TMDNS_SINKHOLE_IPV4", "0.0.0.0"),
@@ -35,6 +35,17 @@ func Load() Config {
 		QueryTimeout:  time.Duration(getenvInt("TMDNS_QUERY_TIMEOUT_MS", 2500)) * time.Millisecond,
 		EventQueueCap: getenvInt("TMDNS_EVENT_QUEUE_CAP", 10000),
 	}
+}
+
+func ResolveHTTPBindAddr(value string) string {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil {
+		return value
+	}
+	if host != "auto" && host != "lan" {
+		return value
+	}
+	return net.JoinHostPort("0.0.0.0", port)
 }
 
 func ResolveBindAddr(value string) string {
