@@ -102,6 +102,36 @@ sudo TMDNS_DNS_ADDR=auto:53 \
 
 On the current school LAN this should bind to `192.168.222.8:53` and `192.168.222.8:8080` when that remains the active wired address. To override detection, set explicit values such as `TMDNS_DNS_ADDR=192.168.222.8:53`.
 
+## macOS Installer Package
+
+Build a local unsigned installer package:
+
+```bash
+./scripts/build-pkg.sh
+```
+
+The package stages:
+
+- `/Applications/TM-DNS.app`
+- `/Library/Application Support/TM-DNS/tmdns`
+- `/Library/LaunchDaemons/com.techmore.tmdns.daemon.plist`
+- logs under `/Library/Logs/TM-DNS/`
+
+The installer starts the LaunchDaemon after install. The daemon runs with `TMDNS_DNS_ADDR=auto:53`, `TMDNS_HTTP_ADDR=auto:8080`, and stores its database at `/Library/Application Support/TM-DNS/tm-dns.db`.
+
+Install locally for testing:
+
+```bash
+sudo installer -pkg build/pkg/TM-DNS-1.0.0.pkg -target /
+```
+
+Check service state:
+
+```bash
+sudo launchctl print system/com.techmore.tmdns.daemon
+curl http://127.0.0.1:8080/api/health
+```
+
 ```bash
 go test ./...
 ./scripts/dev-start.sh

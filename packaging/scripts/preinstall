@@ -1,0 +1,11 @@
+#!/bin/zsh
+set -euo pipefail
+
+label="com.techmore.tmdns.daemon"
+plist="/Library/LaunchDaemons/${label}.plist"
+
+if [[ -f "${plist}" ]]; then
+	launchctl bootout system "${plist}" >/dev/null 2>&1 || true
+fi
+
+exit 0

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.techmore.tmdns.daemon</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Application Support/TM-DNS/tmdns</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>TMDNS_DNS_ADDR</key>
+		<string>auto:53</string>
+		<key>TMDNS_HTTP_ADDR</key>
+		<string>auto:8080</string>
+		<key>TMDNS_DB_PATH</key>
+		<string>/Library/Application Support/TM-DNS/tm-dns.db</string>
+		<key>TMDNS_LOG_LEVEL</key>
+		<string>info</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Library/Logs/TM-DNS/tmdns.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/TM-DNS/tmdns.err.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Library/Application Support/TM-DNS</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

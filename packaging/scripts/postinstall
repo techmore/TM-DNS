@@ -1,0 +1,25 @@
+#!/bin/zsh
+set -euo pipefail
+
+label="com.techmore.tmdns.daemon"
+plist="/Library/LaunchDaemons/${label}.plist"
+
+mkdir -p "/Library/Application Support/TM-DNS" "/Library/Logs/TM-DNS"
+chown -R root:wheel "/Library/Application Support/TM-DNS" "/Library/Logs/TM-DNS"
+chmod 755 "/Library/Application Support/TM-DNS" "/Library/Logs/TM-DNS"
+
+if [[ -f "/Library/Application Support/TM-DNS/tmdns" ]]; then
+	chown root:wheel "/Library/Application Support/TM-DNS/tmdns"
+	chmod 755 "/Library/Application Support/TM-DNS/tmdns"
+fi
+
+if [[ -f "${plist}" ]]; then
+	chown root:wheel "${plist}"
+	chmod 644 "${plist}"
+	launchctl bootout system "${plist}" >/dev/null 2>&1 || true
+	launchctl bootstrap system "${plist}"
+	launchctl enable "system/${label}"
+	launchctl kickstart -k "system/${label}"
+fi
+
+exit 0
