@@ -109,8 +109,8 @@ const indexHTML = `<!doctype html>
   <main class="page">
     <section class="hero">
       <div>
-        <h1>DNS Firewall</h1>
-        <p>Realtime DNS requests, host investigation, block rules, static records, and load visibility for local-first school deployments.</p>
+        <h1>TM-DNS</h1>
+        <p>All your queries are belong to us</p>
       </div>
       <div class="metrics" id="metrics"></div>
     </section>
@@ -208,7 +208,8 @@ function topList(rows, opts = {}) {
   return '<div class="list">'+rows.map(r => {
     const key = cleanDomain(r.key);
     const action = opts.block ? '<button class="danger compact" data-domain="'+esc(key)+'" onclick="blockDomain(this.dataset.domain)">Block</button>' : '';
-    return '<div class="card"><div class="row"><strong class="mono">'+esc(r.key)+'</strong><div class="row" style="gap:8px"><span>'+r.count+'</span>'+action+'</div></div><div class="bar"><span style="width:'+(r.count/max*100)+'%"></span></div></div>';
+    const percent = Number.isFinite(r.percent) ? '<span class="muted mono">'+Math.round(r.percent)+'%</span>' : '';
+    return '<div class="card"><div class="row"><strong class="mono">'+esc(r.key)+'</strong><div class="row" style="gap:8px"><span>'+r.count+'</span>'+percent+action+'</div></div><div class="bar"><span style="width:'+(r.count/max*100)+'%"></span></div></div>';
   }).join("")+'</div>';
 }
 function topHostsList(rows) {

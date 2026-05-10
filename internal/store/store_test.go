@@ -346,3 +346,44 @@ func TestInsertQueryEventBuildsHostDetailAndReport(t *testing.T) {
 		t.Fatal("expected report notes")
 	}
 }
+
+func TestDashboardTopDomainsIncludesLast24HourPercent(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	hostID, _, err := st.EnsureHost(ctx, "192.0.2.20")
+	if err != nil {
+		t.Fatalf("ensure host: %v", err)
+	}
+	now := time.Now().UTC()
+	events := []QueryEvent{
+		{Timestamp: now, HostID: hostID, SourceIP: "192.0.2.20", QueryName: "top.example.", QueryType: "A", Action: "allowed"},
+		{Timestamp: now.Add(-time.Hour), HostID: hostID, SourceIP: "192.0.2.20", QueryName: "top.example.", QueryType: "A", Action: "allowed"},
+		{Timestamp: now.Add(-2 * time.Hour), HostID: hostID, SourceIP: "192.0.2.20", QueryName: "other.example.", QueryType: "A", Action: "allowed"},
+		{Timestamp: now.Add(-25 * time.Hour), HostID: hostID, SourceIP: "192.0.2.20", QueryName: "old.example.", QueryType: "A", Action: "allowed"},
+	}
+	for _, event := range events {
+		if err := st.InsertQueryEvent(ctx, event); err != nil {
+			t.Fatalf("insert event: %v", err)
+		}
+	}
+
+	dashboard, err := st.Dashboard(ctx, "test.db")
+	if err != nil {
+		t.Fatalf("dashboard: %v", err)
+	}
+	if len(dashboard.TopDomains) == 0 {
+		t.Fatal("expected top domains")
+	}
+	top := dashboard.TopDomains[0]
+	if top.Key != "top.example." || top.Count != 2 {
+		t.Fatalf("top domain = %s/%d, want top.example./2", top.Key, top.Count)
+	}
+	if top.Percent < 66.6 || top.Percent > 66.7 {
+		t.Fatalf("top percent = %.2f, want about 66.67", top.Percent)
+	}
+	for _, row := range dashboard.TopDomains {
+		if row.Key == "old.example." {
+			t.Fatal("old event was included in rolling 24-hour top domains")
+		}
+	}
+}
