@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -169,5 +170,32 @@ func TestAPILoopbackBypassesAuth(t *testing.T) {
 	srv.server.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("loopback dashboard status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAPILocalInterfaceBypassesAuth(t *testing.T) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatalf("interface addrs: %v", err)
+	}
+	var localIP net.IP
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP == nil || ipNet.IP.IsLoopback() {
+			continue
+		}
+		if ip4 := ipNet.IP.To4(); ip4 != nil {
+			localIP = ip4
+			break
+		}
+	}
+	if localIP == nil {
+		t.Skip("no non-loopback local IPv4 address")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard", nil)
+	req.RemoteAddr = net.JoinHostPort(localIP.String(), "49152")
+	if !isLoopbackRequest(req) {
+		t.Fatalf("expected %s to be treated as local", req.RemoteAddr)
 	}
 }

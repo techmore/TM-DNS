@@ -164,7 +164,27 @@ func isLoopbackRequest(r *http.Request) bool {
 		host = r.RemoteAddr
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return ip != nil && (ip.IsLoopback() || isLocalInterfaceIP(ip))
+}
+
+func isLocalInterfaceIP(ip net.IP) bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		var localIP net.IP
+		switch value := addr.(type) {
+		case *net.IPNet:
+			localIP = value.IP
+		case *net.IPAddr:
+			localIP = value.IP
+		}
+		if localIP != nil && localIP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func sameOriginUnsafeRequest(r *http.Request) bool {
