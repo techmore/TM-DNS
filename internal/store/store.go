@@ -1281,14 +1281,14 @@ func (s *Store) Dashboard(ctx context.Context, dbPath string) (Dashboard, error)
 	d.EventStoreMode = "sqlite-wal"
 	d.RetentionDays = s.RetentionDays(ctx)
 	today := time.Now().Format("2006-01-02") + "T00:00:00"
-	last24Hours := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339Nano)
+	last48Hours := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano)
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM query_events WHERE ts >= ?`, today).Scan(&d.QueriesToday)
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM query_events WHERE ts >= ? AND action = 'blocked'`, today).Scan(&d.BlockedToday)
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT host_id) FROM query_events WHERE ts >= ?`, today).Scan(&d.UniqueHosts)
 	d.Recent, _ = s.RecentEvents(ctx, "", 30)
 	d.Blocked, _ = s.RecentEvents(ctx, "blocked", 30)
 	d.TopHosts, _ = s.topHostRows(ctx, today)
-	d.TopDomains, _ = s.topRowsWithPercent(ctx, `SELECT query_name, COUNT(*) FROM query_events WHERE ts >= ? GROUP BY query_name ORDER BY COUNT(*) DESC LIMIT 8`, `SELECT COUNT(*) FROM query_events WHERE ts >= ?`, last24Hours)
+	d.TopDomains, _ = s.topRowsWithPercent(ctx, `SELECT query_name, COUNT(*) FROM query_events WHERE ts >= ? GROUP BY query_name ORDER BY COUNT(*) DESC LIMIT 16`, `SELECT COUNT(*) FROM query_events WHERE ts >= ?`, last48Hours)
 	d.RuleHits, _ = s.topRows(ctx, `SELECT target || ' (' || action || ')', hit_count FROM rules WHERE hit_count > 0 ORDER BY hit_count DESC LIMIT 8`)
 	return d, nil
 }

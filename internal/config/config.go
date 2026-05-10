@@ -60,11 +60,7 @@ func ResolveBindAddr(value string) string {
 	if host != "auto" && host != "lan" {
 		return value
 	}
-	ip, ok := AutoLANIPv4()
-	if !ok {
-		return net.JoinHostPort("0.0.0.0", port)
-	}
-	return net.JoinHostPort(ip, port)
+	return net.JoinHostPort("0.0.0.0", port)
 }
 
 type interfaceCandidate struct {

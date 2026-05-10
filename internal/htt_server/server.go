@@ -96,6 +96,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/auth/login", s.authLogin)
 	s.mux.HandleFunc("/api/auth/logout", s.authLogout)
 	s.mux.HandleFunc("/api/health", s.health)
+	s.mux.HandleFunc("/api/diagnostics", s.diagnostics)
 	s.mux.HandleFunc("/api/dashboard", s.dashboard)
 	s.mux.HandleFunc("/api/realtime", s.realtime)
 	s.mux.HandleFunc("/api/blocked", s.blocked)
@@ -204,6 +205,9 @@ func sameOriginUnsafeRequest(r *http.Request) bool {
 
 func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 	ok, _ := s.authorized(r)
+	if isLoopbackRequest(r) {
+		ok = true
+	}
 	writeJSON(w, map[string]any{"authenticated": ok, "required": true})
 }
 
@@ -256,6 +260,44 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"dashboard": d, "dns": s.dns.Status(), "system": s.systemStats(), "version": version.Info()})
+}
+
+func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
+	d, err := s.store.Dashboard(r.Context(), s.cfg.DBPath)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	dnsStatus := s.dns.Status()
+	system := s.systemStats()
+	warnings := []string{}
+	if dnsStatus.DroppedEvents > 0 {
+		warnings = append(warnings, "DNS query events have been dropped. Increase event queue capacity or reduce dashboard/report load.")
+	}
+	if dnsStatus.EventQueueDepth > s.cfg.EventQueueCap/2 {
+		warnings = append(warnings, "DNS event queue is above 50% capacity.")
+	}
+	if system.Power.Supported && system.Power.SleepConfigured {
+		warnings = append(warnings, "macOS system sleep is enabled. Disable sleep before using this Mac as a DNS appliance.")
+	}
+	if strings.HasPrefix(s.cfg.HTTPAddr, "0.0.0.0:") {
+		warnings = append(warnings, "Admin HTTP is reachable on LAN interfaces. Use a strong admin token and prefer trusted management networks.")
+	}
+	writeJSON(w, map[string]any{
+		"ok":        len(warnings) == 0,
+		"dns":       dnsStatus,
+		"dashboard": d,
+		"system":    system,
+		"version":   version.Info(),
+		"config": map[string]any{
+			"dns_addr":        s.cfg.DNSAddr,
+			"http_addr":       s.cfg.HTTPAddr,
+			"upstream":        s.cfg.Upstream,
+			"event_queue_cap": s.cfg.EventQueueCap,
+			"db_path":         s.cfg.DBPath,
+		},
+		"warnings": warnings,
+	})
 }
 
 func (s *Server) systemStats() systemstats.Stats {

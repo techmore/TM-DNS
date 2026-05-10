@@ -90,6 +90,21 @@ func TestAPIHostReportAndRuleCreation(t *testing.T) {
 		t.Fatal("dashboard missing system stats")
 	}
 
+	req = httptest.NewRequest(http.MethodGet, "/api/diagnostics", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	srv.server.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("diagnostics status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var diagnostics map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&diagnostics); err != nil {
+		t.Fatalf("decode diagnostics: %v", err)
+	}
+	if _, ok := diagnostics["warnings"]; !ok {
+		t.Fatal("diagnostics missing warnings")
+	}
+
 	req = httptest.NewRequest(http.MethodGet, "/api/blocklist-presets", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
 	rec = httptest.NewRecorder()
@@ -170,6 +185,23 @@ func TestAPILoopbackBypassesAuth(t *testing.T) {
 	srv.server.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("loopback dashboard status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	req.RemoteAddr = "127.0.0.1:49152"
+	rec = httptest.NewRecorder()
+	srv.server.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("loopback auth status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var status struct {
+		Authenticated bool `json:"authenticated"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&status); err != nil {
+		t.Fatalf("decode auth status: %v", err)
+	}
+	if !status.Authenticated {
+		t.Fatal("loopback auth status should be authenticated")
 	}
 }
 

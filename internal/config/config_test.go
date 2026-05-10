@@ -16,6 +16,13 @@ func TestResolveHTTPBindAddrAutoBindsAllInterfaces(t *testing.T) {
 	}
 }
 
+func TestResolveBindAddrAutoBindsAllInterfaces(t *testing.T) {
+	got := ResolveBindAddr("auto:53")
+	if got != "0.0.0.0:53" {
+		t.Fatalf("ResolveBindAddr auto = %q", got)
+	}
+}
+
 func TestParseNetworkSetupHardwarePorts(t *testing.T) {
 	ports := parseNetworkSetupHardwarePorts(`Hardware Port: Ethernet
 Device: en0

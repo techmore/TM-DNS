@@ -1,6 +1,6 @@
 # TM-DNS
 
-TM-DNS is planned as a local-first DNS-layer firewall for macOS machines that run for long periods of time and serve schools or similar independent organizations. The goal is a small, reliable daemon with a localhost dashboard for static records, realtime rule decisions, query timelines, host investigation, watched IPs/domains, reports, and one-click security list management.
+TM-DNS is a local-first DNS-layer firewall for macOS machines that run for long periods of time and serve schools or similar independent organizations. It ships as a Go DNS daemon plus a native macOS app and web dashboard for static records, realtime rule decisions, query timelines, host investigation, reports, diagnostics, and one-click security list management.
 
 ## Product Direction
 
@@ -17,30 +17,43 @@ TM-DNS is planned as a local-first DNS-layer firewall for macOS machines that ru
 - Stay open source, easy to inspect, and deployable by mid to large independent schools without a complex server stack.
 - Use the visual language from `techmore/Emporia-Vue3-Mac-Utility-Monitor`: dense local dashboard, olive/stone palette, compact cards, timeline-first operational views, and native macOS wrapper potential.
 
-## Current Recommendation
+## Current Architecture
 
-Build the first version as a single Go service:
+The current build uses:
 
 - Go DNS resolver/proxy using `miekg/dns` or a thin internal DNS layer.
-- Embedded HTTP UI and JSON API served from the same binary on localhost.
+- Embedded HTTP UI and JSON API served from the same daemon.
 - SQLite in WAL mode for config, query summaries, audit events, and local timelines.
 - In-memory hot path for DNS decisions: static records, host/group policy, compiled blocklists, cache, and watched targets.
 - Async/batched event writer so DNS request latency does not wait on disk.
-- Prometheus-compatible metrics endpoint plus an in-app system load page.
-- macOS LaunchDaemon for boot-time DNS service plus a lightweight menu bar app for green/yellow/red status and dashboard access.
+- In-app load and diagnostics pages for CPU, memory, disk, database growth, event drops, sleep state, and service config.
+- macOS LaunchDaemon for boot-time DNS service plus a native app for status, setup, blocklists, host investigation, updates, and dashboard access.
 
 Blocky is a strong Go DNS/ad-blocking project and should inform features and configuration concepts, but depending on it directly would make UI-driven static records, per-IP timelines, and school-oriented workflows harder to own. See [docs/architecture.md](docs/architecture.md) for the reasoning.
 
 ## Readiness Assessment
 
-The architecture is ready for an implementation spike, but not yet for a full production build. Before building the full service, we should prototype four high-risk areas:
+TM-DNS is ready for controlled pilot testing. Before broad school-wide production use, validate these items on the target network:
 
-1. DNS hot path: UDP/TCP serving, upstream forwarding, static records, sinkhole responses, and event queue latency.
-2. SQLite tracking: batched writes, hourly rollups, retention pruning, WAL checkpointing, and dashboard query speed.
-3. Block UX: one-click list enablement, allowlist override, realtime rule view, blocked-attempt dashboard, and block-page behavior.
-4. macOS service model: LaunchDaemon install/restart, privileged port 53 binding, and menu bar status polling.
+1. DNS reachability from at least one wired client and one wireless client.
+2. UniFi or DHCP DNS settings point clients at the TM-DNS Mac, not DHCP relay.
+3. macOS sleep is disabled so the Mac behaves like an appliance.
+4. `/api/diagnostics` has no warnings other than expected LAN admin exposure.
+5. Event drops remain at zero during peak query volume.
+6. Blocklist refreshes complete and false positives are reviewed before enabling aggressive lists.
+7. The update path is tested during a maintenance window.
 
-If those pass, the stack is appropriate for implementation.
+For an emergency stop:
+
+```bash
+sudo launchctl bootout system /Library/LaunchDaemons/com.techmore.tmdns.daemon.plist
+```
+
+For a service restart:
+
+```bash
+sudo launchctl kickstart -k system/com.techmore.tmdns.daemon
+```
 
 ## First Milestone
 
@@ -53,7 +66,7 @@ If those pass, the stack is appropriate for implementation.
 
 ## Prototype Run Path
 
-The current prototype runs on non-privileged development ports:
+The development build runs on non-privileged development ports:
 
 - DNS UDP/TCP: `127.0.0.1:1053`
 - Web UI/API: `http://127.0.0.1:8080`
@@ -100,7 +113,7 @@ sudo TMDNS_DNS_ADDR=auto:53 \
   "/Library/Application Support/TM-DNS/tmdns"
 ```
 
-On a packaged install this same configuration is managed by `launchd` through `/Library/LaunchDaemons/com.techmore.tmdns.daemon.plist`, so admins normally should not run the daemon manually. To override detection, set explicit values such as `TMDNS_DNS_ADDR=192.168.222.8:53` in the LaunchDaemon plist and reload the service.
+On a packaged install this same configuration is managed by `launchd` through `/Library/LaunchDaemons/com.techmore.tmdns.daemon.plist`, so admins normally should not run the daemon manually. `TMDNS_DNS_ADDR=auto:53` now binds DNS to `0.0.0.0:53` so loopback and LAN validation use the same listener. The app still detects the preferred wired LAN IP for setup instructions.
 
 ## macOS Installer Package
 
@@ -144,6 +157,7 @@ Check service state:
 ```bash
 sudo launchctl print system/com.techmore.tmdns.daemon
 curl http://127.0.0.1:8080/api/health
+curl http://127.0.0.1:8080/api/diagnostics
 ```
 
 ```bash

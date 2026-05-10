@@ -117,7 +117,7 @@ const indexHTML = `<!doctype html>
     <section id="view"></section>
   </main>
 <script>
-const pages = ["Dashboard","Realtime","Blocked","Hosts","Rules","Lists","Records","Reports","Audit","Load","Settings"];
+const pages = ["Dashboard","Realtime","Blocked","Hosts","Rules","Lists","Records","Reports","Audit","Load","Diagnostics","Settings"];
 const pageLabels = {"Lists":"Block Lists"};
 let initialHostID = null;
 function pageFromHash() {
@@ -130,7 +130,7 @@ function pageFromHash() {
   return pages.includes(raw) ? raw : "Dashboard";
 }
 const initialPage = pageFromHash();
-let state = { page:initialPage, authed:false, dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], audit:[], hostReport:null, hostDetail:null, selectedHostID:initialHostID, unifi:null, retention:null };
+let state = { page:initialPage, authed:false, dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], audit:[], hostReport:null, hostDetail:null, selectedHostID:initialHostID, unifi:null, retention:null, diagnostics:null, lastFullLoad:0 };
 let blocklistPresets = [];
 let blocklistSources = [];
 const $ = s => document.querySelector(s);
@@ -196,10 +196,10 @@ function renderHostDetailPage() {
   const recent = detail.recent || [];
   const lastSeen = recent.length ? fmtTime(recent[0].timestamp) : esc(h.last_seen || 'no activity');
   return '<div class="card" style="margin-top:12px"><div class="section-title"><h2>'+hostDisplayName(h)+'</h2><span class="muted mono">'+esc(h.source_ip||'')+'</span></div>'+
-    '<div class="toolbar"><button class="secondary" onclick="show(\'Hosts\')">Back to Hosts</button><span class="muted">Live refreshes every 2 seconds while this page is open.</span></div>'+
+    '<div class="toolbar"><button class="secondary" onclick="show(\'Hosts\')">Back to Hosts</button><span class="muted">Live refreshes every 5 seconds while this page is open.</span></div>'+
     '<div class="metrics" style="grid-template-columns:repeat(4,minmax(140px,1fr));margin:0 0 12px"><div><div class="metric-label">Total Queries</div><div class="metric-value">'+(h.query_count||0)+'</div></div><div><div class="metric-label">Total Blocks</div><div class="metric-value">'+(h.block_count||0)+'</div></div><div><div class="metric-label">Last Hit</div><div class="metric-value" style="font-size:24px">'+lastSeen+'</div></div><div><div class="metric-label">Identity</div><div class="metric-value" style="font-size:24px">'+esc(h.identity_confidence||'source_ip')+'</div></div></div>'+
     '<p class="muted mono" style="margin-top:0">DNS '+esc(h.hostname||'not learned')+' · MAC '+esc(h.mac||'not learned')+(h.vendor ? ' · '+esc(h.vendor) : '')+'</p></div>'+
-    '<div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">last 24 hours, sorted by hits</span></div>'+topList(detail.top_domains||[], {block:true})+'</div>'+
+    '<div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">selected window, sorted by hits</span></div>'+topList(detail.top_domains||[], {block:true})+'</div>'+
     '<div class="card"><div class="section-title"><h2>Actions</h2><span class="muted">last 24 hours</span></div>'+topList(detail.top_actions||[])+'</div></div>'+
     '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Timeline</h2><span class="muted">most recent hits first</span></div>'+eventsTable(recent)+'</div>';
 }
@@ -240,8 +240,8 @@ function blocklistSourceCards() {
 function render() {
   renderTabs(); renderMetrics();
   const d = state.dashboard?.dashboard || {};
-  if (state.page === "Dashboard") $("#view").innerHTML = applianceWarning()+systemCards()+'<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Hosts</h2><span class="muted">name, DNS name, IP</span></div>'+topHostsList(d.top_hosts||[])+'</div><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">one-click policy</span></div>'+topList(d.top_domains||[], {block:true})+'</div></div>';
-  if (state.page === "Realtime") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Firewall View</h2><span class="muted">auto-refreshes every 2s</span></div>'+eventsTable(state.realtime)+'</div>';
+  if (state.page === "Dashboard") $("#view").innerHTML = applianceWarning()+systemCards()+'<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Hosts</h2><span class="muted">name, DNS name, IP</span></div>'+topHostsList(d.top_hosts||[])+'</div><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">last 48 hours, one-click policy</span></div>'+topList(d.top_domains||[], {block:true})+'</div></div>';
+  if (state.page === "Realtime") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Firewall View</h2><span class="muted">auto-refreshes every 5s</span></div>'+eventsTable(state.realtime)+'</div>';
   if (state.page === "Blocked") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Blocked Attempts</h2><span class="muted">who, what, why, when</span></div>'+eventsTable(state.blocked)+'</div>';
   if (state.page === "Hosts") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Hosts</h2><span class="muted">click a host to open its detail view</span></div><div class="table-wrap"><table><thead><tr><th>Host</th><th>IP</th><th>MAC / Vendor</th><th>Identity</th><th>Last Seen</th><th>Queries</th><th>Blocks</th></tr></thead><tbody>'+state.hosts.map(h => '<tr class="clickable '+(state.selectedHostID===h.id?'selected':'')+'" onclick="selectHost('+h.id+')"><td><strong>'+esc(h.label||h.hostname||h.source_ip)+'</strong><div class="muted mono">'+esc(h.hostname||'hostname not learned yet')+'</div></td><td class="mono">'+esc(h.source_ip)+'</td><td class="mono">'+esc(h.mac||'')+'<div class="muted">'+esc(h.vendor||'')+'</div></td><td>'+esc(h.identity_confidence)+'<div class="muted mono">'+esc(h.identity_last_checked||'not checked yet')+'</div></td><td>'+h.last_seen+'</td><td>'+h.query_count+'</td><td>'+h.block_count+'</td></tr>').join("")+'</tbody></table></div></div>';
   if (state.page === "Host Detail") $("#view").innerHTML = renderHostDetailPage();
@@ -251,9 +251,10 @@ function render() {
   if (state.page === "Reports") { const r = state.hostReport; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Host Report</h2><span class="muted">'+(r?.host?.label||r?.host?.source_ip||'no host yet')+'</span></div>'+(r ? '<div class="metrics" style="grid-template-columns:repeat(3,1fr);margin:0 0 12px"><div><div class="metric-label">Queries</div><div class="metric-value">'+r.total_queries+'</div></div><div><div class="metric-label">Blocked</div><div class="metric-value">'+r.total_blocked+'</div></div><div><div class="metric-label">Domains</div><div class="metric-value">'+r.unique_domains+'</div></div></div><div class="section-title"><h2>Top Domains</h2><span class="muted">one-click policy</span></div>'+topList(r.top_domains||[], {block:true})+'<div class="section-title" style="margin-top:12px"><h2>Notes</h2></div><ul>'+r.recommended_notes.map(n => '<li>'+n+'</li>').join("")+'</ul>' : '<p class="muted">No host activity has been recorded yet.</p>')+'</div><div class="card"><div class="section-title"><h2>Policy Report</h2></div>'+topList(d.rule_hits||[])+'</div></div>'; }
   if (state.page === "Audit") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Audit Log</h2><span class="muted">policy, list, and admin changes</span></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead><tbody>'+state.audit.map(e => '<tr><td class="mono">'+fmtTime(e.timestamp)+'</td><td class="mono">'+esc(e.action)+'</td><td class="mono domain-cell">'+esc(e.target)+'</td><td>'+esc(e.detail)+'</td></tr>').join("")+'</tbody></table></div></div>';
   if (state.page === "Load") { const dns = state.dashboard?.dns || {}; const sys = state.dashboard?.system || {}; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>Service Load</h2></div><table><tbody>'+Object.entries(dns).map(([k,v]) => '<tr><th>'+k+'</th><td class="mono">'+JSON.stringify(v)+'</td></tr>').join("")+'</tbody></table></div><div class="card"><div class="section-title"><h2>System</h2></div><table><tbody>'+Object.entries(sys).map(([k,v]) => '<tr><th>'+k+'</th><td class="mono">'+JSON.stringify(v)+'</td></tr>').join("")+'</tbody></table></div></div>'; }
+  if (state.page === "Diagnostics") { const x = state.diagnostics || {}; const warnings = x.warnings || []; $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Diagnostics</h2><span class="muted">'+(x.ok?'ready':'needs attention')+'</span></div>'+(warnings.length ? '<ul>'+warnings.map(w => '<li>'+esc(w)+'</li>').join("")+'</ul>' : '<p class="muted">No current diagnostic warnings.</p>')+'<div class="toolbar"><button class="secondary" onclick="copyDiagnostics()">Copy JSON</button><span class="muted mono">Use this for support and deployment checks.</span></div></div><div class="grid"><div class="card"><div class="section-title"><h2>Config</h2></div><table><tbody>'+Object.entries(x.config||{}).map(([k,v]) => '<tr><th>'+esc(k)+'</th><td class="mono">'+esc(JSON.stringify(v))+'</td></tr>').join("")+'</tbody></table></div><div class="card"><div class="section-title"><h2>DNS</h2></div><table><tbody>'+Object.entries(x.dns||{}).map(([k,v]) => '<tr><th>'+esc(k)+'</th><td class="mono">'+esc(JSON.stringify(v))+'</td></tr>').join("")+'</tbody></table></div></div>'; }
   if (state.page === "Settings") { const u = state.unifi || {}; const r = state.retention || {}; $("#view").innerHTML = '<div class="grid"><div class="card"><div class="section-title"><h2>UniFi Identity Import</h2><span class="muted">optional, never required</span></div><div class="toolbar"><label class="switch"><input id="unifiEnabled" type="checkbox" '+(u.enabled?'checked':'')+'><span class="slider"></span><span>Enabled</span></label></div><div class="toolbar"><input id="unifiBaseURL" placeholder="https://unifi.example.com" value="'+esc(u.base_url||'')+'" style="min-width:320px"><input id="unifiSite" placeholder="default" value="'+esc(u.site||'default')+'" style="width:130px"><input id="unifiAPIKey" type="password" placeholder="'+(u.has_api_key?'API key saved - leave blank to keep':'API key')+'" style="min-width:260px"><button class="primary" onclick="saveUniFi()">Save</button><button class="secondary" onclick="testUniFi()">Test</button><button class="secondary" onclick="importUniFi()">Import Clients</button></div><p class="muted">Create a read-only UniFi API key, enter the UniFi OS/controller URL and site name, then test before importing. The key is encrypted locally before storage.</p><p class="muted mono">Status: '+esc(u.last_status||'not configured')+' · Last import: '+esc(u.last_import||'never')+'</p></div><div class="card"><div class="section-title"><h2>Retention</h2><span class="muted">query log storage</span></div><div class="toolbar"><input id="retentionDays" type="number" min="1" max="3650" value="'+esc(r.days||30)+'" style="width:120px"><button class="primary" onclick="saveRetention()">Save Days</button><button class="secondary" onclick="purgeRetention()">Purge Now</button></div><p class="muted mono">Last purge: '+esc(r.last_purge||'never')+'</p><div class="section-title" style="margin-top:12px"><h2>Instructions</h2></div><ol><li>Use the UniFi console URL, usually https://gateway-ip or https://unifi-host:8443.</li><li>Leave site as default unless your controller uses another site id.</li><li>If a site does not use UniFi, leave this blank. PTR, Bonjour, and ARP discovery continue to work.</li></ol></div></div>'; }
 }
-async function load() {
+async function load(full = true) {
   const auth = await api('/api/auth/status');
   if (!auth.authenticated) {
     state.authed = false;
@@ -264,16 +265,24 @@ async function load() {
   state.dashboard = await api('/api/dashboard');
   state.realtime = await api('/api/realtime');
   state.blocked = await api('/api/blocked');
-  state.hosts = await api('/api/hosts');
-  state.rules = await api('/api/rules');
-  state.records = await api('/api/records');
-  state.audit = await api('/api/audit');
-  state.unifi = await api('/api/settings/unifi');
-  state.retention = await api('/api/settings/retention');
-  blocklistPresets = await api('/api/blocklist-presets');
-  blocklistSources = await api('/api/blocklist-sources');
-  state.hostDetail = state.selectedHostID ? await api('/api/hosts/'+state.selectedHostID) : null;
-  state.hostReport = state.selectedHostID ? await api('/api/reports/host/'+state.selectedHostID) : null;
+  if (full || Date.now() - state.lastFullLoad > 60000) {
+    state.hosts = await api('/api/hosts');
+    state.rules = await api('/api/rules');
+    state.records = await api('/api/records');
+    state.audit = await api('/api/audit');
+    state.unifi = await api('/api/settings/unifi');
+    state.retention = await api('/api/settings/retention');
+    state.diagnostics = await api('/api/diagnostics');
+    blocklistPresets = await api('/api/blocklist-presets');
+    blocklistSources = await api('/api/blocklist-sources');
+    state.hostReport = state.selectedHostID ? await api('/api/reports/host/'+state.selectedHostID) : null;
+    state.lastFullLoad = Date.now();
+  }
+  if (state.page === "Host Detail" && state.selectedHostID) {
+    state.hostDetail = await api('/api/hosts/'+state.selectedHostID);
+  } else if (full && state.selectedHostID) {
+    state.hostDetail = await api('/api/hosts/'+state.selectedHostID);
+  }
   render();
 }
 async function login() {
@@ -374,8 +383,11 @@ async function purgeRetention() {
   alert('Purged '+result.removed+' old query events.');
   await load();
 }
+async function copyDiagnostics() {
+  await navigator.clipboard.writeText(JSON.stringify(state.diagnostics || {}, null, 2));
+}
 load().catch(e => { $("#view").innerHTML = '<div class="card" style="margin-top:12px;color:var(--red)">'+e.message+'</div>'; });
-setInterval(() => { if (state.authed) load().catch(console.error); }, 2000);
+setInterval(() => { if (state.authed) load(false).catch(console.error); }, 5000);
 </script>
 </body>
 </html>`
