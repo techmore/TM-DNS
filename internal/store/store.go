@@ -807,12 +807,12 @@ func (s *Store) SetBlocklistPresetEnabled(ctx context.Context, id string, enable
 }
 
 func (s *Store) BlocklistSources(ctx context.Context) ([]BlocklistSource, error) {
+	sources := []BlocklistSource{}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, name, url, format, enabled, last_status, last_checked, created_at FROM blocklist_sources ORDER BY enabled DESC, name ASC`)
 	if err != nil {
-		return nil, err
+		return sources, err
 	}
 	defer rows.Close()
-	var sources []BlocklistSource
 	for rows.Next() {
 		var source BlocklistSource
 		var enabled int
@@ -1254,6 +1254,7 @@ func (s *Store) InsertQueryEvent(ctx context.Context, event QueryEvent) error {
 }
 
 func (s *Store) RecentEvents(ctx context.Context, action string, limit int) ([]QueryEvent, error) {
+	empty := []QueryEvent{}
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -1267,7 +1268,7 @@ func (s *Store) RecentEvents(ctx context.Context, action string, limit int) ([]Q
 	rows, err := s.db.QueryContext(ctx, `SELECT qe.ts, qe.host_id, qe.source_ip, COALESCE(NULLIF(h.label, ''), NULLIF(h.hostname, ''), qe.source_ip), qe.query_name, qe.query_type, qe.action, qe.matched_rule_id, qe.matched_source, qe.response_code, qe.upstream, qe.latency_ms, qe.answer_summary
 		FROM query_events qe JOIN hosts h ON h.id = qe.host_id `+where+` ORDER BY qe.id DESC LIMIT ?`, args...)
 	if err != nil {
-		return nil, err
+		return empty, err
 	}
 	defer rows.Close()
 	return scanEvents(rows)
@@ -1448,15 +1449,15 @@ func (s *Store) Audit(ctx context.Context, action, target, detail string) error 
 }
 
 func (s *Store) AuditEvents(ctx context.Context, limit int) ([]AuditEvent, error) {
+	events := []AuditEvent{}
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, ts, action, target, detail FROM audit_events ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
-		return nil, err
+		return events, err
 	}
 	defer rows.Close()
-	var events []AuditEvent
 	for rows.Next() {
 		var event AuditEvent
 		if err := rows.Scan(&event.ID, &event.Timestamp, &event.Action, &event.Target, &event.Detail); err != nil {
@@ -1882,12 +1883,12 @@ func isPrivateFetchIP(ip net.IP) bool {
 }
 
 func (s *Store) topRows(ctx context.Context, query string, args ...any) ([]TopRow, error) {
+	out := []TopRow{}
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
 	defer rows.Close()
-	var out []TopRow
 	for rows.Next() {
 		var row TopRow
 		if err := rows.Scan(&row.Key, &row.Count); err != nil {
@@ -1899,6 +1900,7 @@ func (s *Store) topRows(ctx context.Context, query string, args ...any) ([]TopRo
 }
 
 func (s *Store) topHostRows(ctx context.Context, since string) ([]TopHostRow, error) {
+	out := []TopHostRow{}
 	rows, err := s.db.QueryContext(ctx, `SELECT h.id, COALESCE(NULLIF(h.label, ''), NULLIF(h.hostname, ''), h.source_ip), h.source_ip, h.label, h.hostname, h.mac, h.vendor, COUNT(*)
 		FROM query_events qe JOIN hosts h ON h.id = qe.host_id
 		WHERE qe.ts >= ?
@@ -1906,10 +1908,9 @@ func (s *Store) topHostRows(ctx context.Context, since string) ([]TopHostRow, er
 		ORDER BY COUNT(*) DESC
 		LIMIT 8`, since)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
 	defer rows.Close()
-	var out []TopHostRow
 	for rows.Next() {
 		var row TopHostRow
 		if err := rows.Scan(&row.ID, &row.Key, &row.SourceIP, &row.Label, &row.Hostname, &row.MAC, &row.Vendor, &row.Count); err != nil {
@@ -1945,7 +1946,7 @@ func scanRule(scanner ruleScanner) (Rule, error) {
 }
 
 func scanEvents(rows *sql.Rows) ([]QueryEvent, error) {
-	var events []QueryEvent
+	events := []QueryEvent{}
 	for rows.Next() {
 		var event QueryEvent
 		var ts string
