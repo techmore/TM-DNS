@@ -275,6 +275,26 @@ function systemCards() {
     [['CPU', (s.cpu_percent ?? 0)+'%'], ['Memory', (s.resident_mb ?? 0)+' MB'], ['TM-DNS Storage', (s.app_storage_mb ?? 0)+' MB'], ['System Disk Used', (s.disk_used_percent ?? 0)+'%']].map(x => '<div><div class="metric-label">'+x[0]+'</div><div class="metric-value">'+x[1]+'</div></div>').join("")+
     '</div><p class="muted mono" style="margin-bottom:0">TM-DNS: DB '+(s.db_size_mb ?? 0)+' MB · WAL '+(s.wal_size_mb ?? 0)+' MB · SHM '+(s.shm_size_mb ?? 0)+' MB</p><p class="muted mono" style="margin:4px 0 0">System disk: '+(s.disk_used_gb ?? 0)+' GB used / '+(s.disk_total_gb ?? 0)+' GB · '+(s.disk_free_gb ?? 0)+' GB free · data '+(s.data_dir||'')+'</p></div>';
 }
+function haRoleOverviewCard() {
+  const ha = state.dashboard?.ha || {};
+  const dns = state.dashboard?.dns || {};
+  const secondary = ha.role === 'secondary';
+  const hasRole = !!ha.role;
+  const localTitle = !hasRole ? 'This Mac: Role Loading' : (secondary ? 'This Mac: Secondary DNS' : 'This Mac: Primary DNS');
+  const peerTitle = !hasRole ? 'DNS Peer' : (secondary ? 'Primary DNS Peer' : 'Secondary DNS Peer');
+  let status = 'Role status loading';
+  if (ha.role) {
+    if (!ha.enabled) status = 'HA disabled';
+    else if (!ha.configured) status = secondary ? 'Not paired to primary' : 'No secondary paired';
+    else if (ha.stale) status = secondary ? 'Primary heartbeat stale' : 'Secondary heartbeat stale';
+    else status = secondary ? 'Primary reachable' : 'Secondary reachable';
+  }
+  const heartbeat = Number.isFinite(ha.heartbeat_age_seconds) ? (ha.heartbeat_age_seconds < 60 ? ha.heartbeat_age_seconds+'s ago' : Math.floor(ha.heartbeat_age_seconds/60)+'m ago') : (ha.last_heartbeat || 'never');
+  return '<div class="summary-grid">'+
+    '<div class="card"><div class="section-title"><h2>'+localTitle+'</h2><span class="muted">active role</span></div><p class="mono" style="margin:0;color:var(--stone-900)">DNS listener: '+esc(dns.dns_addr || 'unknown')+'</p><p class="muted mono" style="margin:6px 0 0">Runtime queries: '+esc(dns.queries || 0)+' · blocked: '+esc(dns.blocked || 0)+'</p></div>'+
+    '<div class="card"><div class="section-title"><h2>'+peerTitle+'</h2><span class="muted">'+esc(status)+'</span></div><p class="mono" style="margin:0;color:var(--stone-900)">Peer: '+esc(ha.peer_name || 'not named')+'</p><p class="muted mono" style="margin:6px 0 0">URL: '+esc(ha.peer_url || 'not configured')+'</p><p class="muted mono" style="margin:6px 0 0">Heartbeat: '+esc(heartbeat)+' · Sync: '+esc(ha.last_sync || 'never')+'</p></div>'+
+    '</div>';
+}
 function haPairingCard() {
   const pending = (state.haJoinRequests || []).filter(r => r.status === 'pending');
   if (pending.length) {
@@ -301,7 +321,7 @@ function blocklistSourceCards() {
 function render() {
   renderTabs(); renderMetrics();
   const d = state.dashboard?.dashboard || {};
-  if (state.page === "Dashboard") $("#view").innerHTML = applianceWarning()+systemCards()+haPairingCard()+'<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Hosts</h2><span class="muted">name, DNS name, IP</span></div>'+topHostsList(d.top_hosts||[])+'</div><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">last 48 hours, one-click policy</span></div>'+topList(d.top_domains||[], {block:true})+'</div></div>';
+  if (state.page === "Dashboard") $("#view").innerHTML = applianceWarning()+systemCards()+haRoleOverviewCard()+haPairingCard()+'<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Hosts</h2><span class="muted">name, DNS name, IP</span></div>'+topHostsList(d.top_hosts||[])+'</div><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">last 48 hours, one-click policy</span></div>'+topList(d.top_domains||[], {block:true})+'</div></div>';
   if (state.page === "Realtime") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Firewall View</h2><span class="muted">auto-refreshes every 5s</span></div>'+eventsTable(state.realtime)+'</div>';
   if (state.page === "Blocked") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Blocked Attempts</h2><span class="muted">who, what, why, when</span></div>'+eventsTable(state.blocked)+'</div>';
   if (state.page === "Hosts") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Hosts</h2><span class="muted">click a host to open its detail view</span></div><div class="table-wrap"><table><thead><tr><th>Host</th><th>IP</th><th>MAC / Vendor</th><th>Identity</th><th>Last Seen</th><th>Queries</th><th>Blocks</th></tr></thead><tbody>'+state.hosts.map(h => '<tr class="clickable '+(state.selectedHostID===h.id?'selected':'')+'" onclick="selectHost('+h.id+')"><td><strong>'+esc(h.label||h.hostname||h.source_ip)+'</strong><div class="muted mono">'+esc(h.hostname||'hostname not learned yet')+'</div></td><td class="mono">'+esc(h.source_ip)+'</td><td class="mono">'+esc(h.mac||'')+'<div class="muted">'+esc(h.vendor||'')+'</div></td><td>'+esc(h.identity_confidence)+'<div class="muted mono">'+esc(h.identity_last_checked||'not checked yet')+'</div></td><td>'+h.last_seen+'</td><td>'+h.query_count+'</td><td>'+h.block_count+'</td></tr>').join("")+'</tbody></table></div></div>';
