@@ -36,12 +36,53 @@ Blocky is a strong Go DNS/ad-blocking project and should inform features and con
 TM-DNS is ready for controlled pilot testing. Before broad school-wide production use, validate these items on the target network:
 
 1. DNS reachability from at least one wired client and one wireless client.
-2. UniFi or DHCP DNS settings point clients at the TM-DNS Mac, not DHCP relay.
-3. macOS sleep is disabled so the Mac behaves like an appliance.
-4. `/api/diagnostics` has no warnings other than expected LAN admin exposure.
-5. Event drops remain at zero during peak query volume.
-6. Blocklist refreshes complete and false positives are reviewed before enabling aggressive lists.
-7. The update path is tested during a maintenance window.
+2. UniFi or DHCP DNS settings point clients at the TM-DNS Mac as DNS servers, not DHCP relay.
+3. Two onsite DNS servers are deployed, advertised by DHCP, and heartbeating before production rollout.
+4. macOS sleep is disabled so each Mac behaves like an appliance.
+5. `/api/diagnostics` has no warnings other than expected LAN admin exposure.
+6. Event drops remain at zero during peak query volume.
+7. Blocklist refreshes complete and false positives are reviewed before enabling aggressive lists.
+8. The update path is tested during a maintenance window.
+
+## New User Quick Start
+
+TM-DNS is infrastructure. Treat it like a firewall or DHCP server, not a casual desktop app. A single TM-DNS Mac can work for a pilot, but production school networks should use two onsite Macs so DNS keeps working if one Mac restarts, sleeps, updates, loses network, or fails.
+
+Recommended first deployment:
+
+1. Choose two wired Macs or Mac minis.
+2. Give both Macs static IPs or DHCP reservations.
+3. Install TM-DNS on both Macs using the signed/notarized `.pkg`.
+4. Open `/Applications/TM-DNS.app` on each Mac and confirm the service is online.
+5. Disable macOS sleep on both Macs.
+6. Configure one node as `Primary` and the other as `Secondary` in Settings.
+7. Enter the peer API URL and peer admin token on both nodes.
+8. Run `Heartbeat` and confirm the overview no longer warns about missing redundant DNS.
+9. Run `Push Sync` from the primary after rules, static records, block lists, or retention settings change.
+10. In DHCP, advertise both TM-DNS IPs as DNS servers.
+
+Do not set TM-DNS as a DHCP relay target. DHCP relay is not DNS. In UniFi, leave DHCP mode as DHCP Server and set TM-DNS under DNS server options for the network.
+
+## Redundant DNS
+
+For production, DHCP should hand out two DNS server IPs:
+
+```text
+DNS Server 1: primary TM-DNS Mac static IP
+DNS Server 2: secondary TM-DNS Mac static IP
+```
+
+The primary pushes policy to the secondary. The secondary receives:
+
+- static records
+- rules and rule enabled/disabled state
+- block list preset enabled/disabled state
+- custom block list sources
+- retention settings
+
+The secondary does not receive local query history, host observations, UniFi API keys, admin tokens, updater state, or machine-specific settings. Those remain local to each Mac.
+
+The native Overview page and web Dashboard warn when TM-DNS cannot verify a redundant peer. The warning clears when secondary DNS is enabled, configured with a peer token, and the heartbeat is current.
 
 For an emergency stop:
 
@@ -99,11 +140,9 @@ tail -f /tmp/tmdns-dev.log
 ./scripts/dev-stop.sh
 ```
 
-Full local verification:
-
 ## LAN Run Path
 
-For a live LAN resolver, the daemon can now choose the Mac's LAN IPv4 at startup. It asks macOS for hardware ports and prefers wired Ethernet/LAN/Thunderbolt devices over Wi-Fi when multiple active interfaces exist.
+For a live LAN resolver, the daemon can choose the Mac's LAN IPv4 at startup. It asks macOS for hardware ports and prefers wired Ethernet/LAN/Thunderbolt devices over Wi-Fi when multiple active interfaces exist.
 
 ```bash
 sudo TMDNS_DNS_ADDR=auto:53 \
@@ -113,7 +152,7 @@ sudo TMDNS_DNS_ADDR=auto:53 \
   "/Library/Application Support/TM-DNS/tmdns"
 ```
 
-On a packaged install this same configuration is managed by `launchd` through `/Library/LaunchDaemons/com.techmore.tmdns.daemon.plist`, so admins normally should not run the daemon manually. `TMDNS_DNS_ADDR=auto:53` now binds DNS to `0.0.0.0:53` so loopback and LAN validation use the same listener. The app still detects the preferred wired LAN IP for setup instructions.
+On a packaged install this configuration is managed by `launchd` through `/Library/LaunchDaemons/com.techmore.tmdns.daemon.plist`, so admins normally should not run the daemon manually. `TMDNS_DNS_ADDR=auto:53` binds DNS to the selected LAN listener so loopback and LAN validation use the same service. The app detects the preferred wired LAN IP for setup instructions.
 
 ## macOS Installer Package
 
@@ -160,8 +199,34 @@ curl http://127.0.0.1:8080/api/health
 curl http://127.0.0.1:8080/api/diagnostics
 ```
 
+Validate DNS locally:
+
+```bash
+dig @127.0.0.1 example.com
+dig @127.0.0.1 router.test
+dig @127.0.0.1 blocked.test
+```
+
+Validate DNS from the LAN using the detected Mac IP shown in the app:
+
+```bash
+dig @<tm-dns-lan-ip> example.com
+```
+
+Validate that clients are actually using TM-DNS:
+
+1. Point a test VLAN or a small DHCP scope at both TM-DNS IPs.
+2. Renew DHCP on one wired and one wireless client.
+3. Query a domain from each client.
+4. Confirm the Realtime and Hosts pages show the client IPs and domains.
+
+If the network loses DNS, revert DHCP DNS server settings to the router or a known-good resolver, then restart affected clients or renew DHCP leases.
+
+Development verification:
+
 ```bash
 go test ./...
+xcodebuild -project xcode-TM-DNS/xcode-TM-DNS.xcodeproj -scheme xcode-TM-DNS -configuration Debug build
 ./scripts/dev-start.sh
 ./scripts/smoke.sh
 ```

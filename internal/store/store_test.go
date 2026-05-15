@@ -245,6 +245,136 @@ func TestUniFiSettingsAndImport(t *testing.T) {
 	}
 }
 
+func TestHASettingsAndSyncPayload(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	saved, err := st.SaveHASettings(ctx, HASettings{
+		Enabled:   true,
+		Role:      "primary",
+		PeerName:  "secondary",
+		PeerURL:   "http://192.0.2.11:8080",
+		PeerToken: "secret",
+	})
+	if err != nil {
+		t.Fatalf("save HA settings: %v", err)
+	}
+	if !saved.Enabled || saved.Role != "primary" || saved.PeerURL != "http://192.0.2.11:8080" || !saved.HasPeerToken || saved.PeerToken != "" {
+		t.Fatalf("unexpected saved HA settings: %+v", saved)
+	}
+	if err := st.UpsertStaticRecord(ctx, StaticRecord{Name: "ha.test", Type: "A", Value: "192.0.2.10", TTL: 60}); err != nil {
+		t.Fatalf("upsert record: %v", err)
+	}
+	if _, err := st.AddRule(ctx, "blocked-ha.test", "block", "ha sync"); err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+	if _, err := st.SetBlocklistPresetEnabled(ctx, "hagezi-pro", true); err != nil {
+		t.Fatalf("enable preset: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO blocklist_sources(name, url, format, enabled, created_at) VALUES('Synced Custom', 'https://example.com/list.txt', 'domains', 1, ?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert source: %v", err)
+	}
+	payload, err := st.ExportHASyncPayload(ctx)
+	if err != nil {
+		t.Fatalf("export payload: %v", err)
+	}
+
+	secondary := testStore(t)
+	if err := secondary.UpsertStaticRecord(ctx, StaticRecord{Name: "stale.test", Type: "A", Value: "192.0.2.200", TTL: 60}); err != nil {
+		t.Fatalf("stale record: %v", err)
+	}
+	if _, err := secondary.AddRule(ctx, "stale-block.test", "block", "stale"); err != nil {
+		t.Fatalf("stale rule: %v", err)
+	}
+	if _, err := secondary.db.ExecContext(ctx, `INSERT INTO blocklist_sources(name, url, format, enabled, created_at) VALUES('Stale Custom', 'https://example.com/stale.txt', 'domains', 1, ?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("stale source: %v", err)
+	}
+	result, err := secondary.ApplyHASyncPayload(ctx, payload)
+	if err != nil {
+		t.Fatalf("apply payload: %v", err)
+	}
+	if result.StaticRecords == 0 || result.Rules == 0 || result.BlocklistPresets == 0 {
+		t.Fatalf("unexpected sync result: %+v", result)
+	}
+	if rule, err := secondary.MatchRule(ctx, "blocked-ha.test"); err != nil || rule == nil || !rule.Enabled {
+		t.Fatalf("synced rule = %+v err=%v", rule, err)
+	}
+	records, err := secondary.StaticRecords(ctx)
+	if err != nil {
+		t.Fatalf("secondary records: %v", err)
+	}
+	found := false
+	for _, record := range records {
+		if record.Name == "ha.test." && record.Value == "192.0.2.10" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("synced static record not found")
+	}
+	records, err = secondary.StaticRecords(ctx)
+	if err != nil {
+		t.Fatalf("secondary records after sync: %v", err)
+	}
+	for _, record := range records {
+		if record.Name == "stale.test." {
+			t.Fatal("stale static record was not removed by authoritative sync")
+		}
+	}
+	if rule, err := secondary.MatchRule(ctx, "stale-block.test"); err != nil || rule != nil {
+		t.Fatalf("stale rule still matched after sync: %+v err=%v", rule, err)
+	}
+	sources, err := secondary.BlocklistSources(ctx)
+	if err != nil {
+		t.Fatalf("secondary sources: %v", err)
+	}
+	for _, source := range sources {
+		if source.URL == "https://example.com/stale.txt" {
+			t.Fatal("stale blocklist source was not removed by authoritative sync")
+		}
+	}
+	foundSource := false
+	for _, source := range sources {
+		if source.URL == "https://example.com/list.txt" {
+			foundSource = true
+		}
+	}
+	if !foundSource {
+		t.Fatal("synced blocklist source not found")
+	}
+	payload.BlocklistSources = append(payload.BlocklistSources, BlocklistSource{Name: "Bad", URL: "file:///tmp/list.txt", Format: "domains", Enabled: true})
+	if _, err := secondary.ApplyHASyncPayload(ctx, payload); err == nil {
+		t.Fatal("expected invalid imported blocklist source URL to fail")
+	}
+}
+
+func TestHAHealthDetectsStaleHeartbeat(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	if _, err := st.SaveHASettings(ctx, HASettings{
+		Enabled:   true,
+		Role:      "secondary",
+		PeerName:  "Primary",
+		PeerURL:   "http://192.0.2.10:8080",
+		PeerToken: "secret",
+	}); err != nil {
+		t.Fatalf("save HA settings: %v", err)
+	}
+	old := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339Nano)
+	if err := st.setSetting(ctx, "ha.last_heartbeat", old); err != nil {
+		t.Fatalf("set heartbeat: %v", err)
+	}
+	if err := st.setSetting(ctx, "ha.last_status", "ok"); err != nil {
+		t.Fatalf("set status: %v", err)
+	}
+	health, err := st.HAHealth(ctx)
+	if err != nil {
+		t.Fatalf("ha health: %v", err)
+	}
+	if !health.Enabled || !health.Configured || !health.Stale {
+		t.Fatalf("unexpected health: %+v", health)
+	}
+}
+
 func TestParseBlocklistDomainsAndMatch(t *testing.T) {
 	input := `
 # comment

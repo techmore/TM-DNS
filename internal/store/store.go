@@ -211,6 +211,59 @@ type RetentionSettings struct {
 	LastPurge string `json:"last_purge"`
 }
 
+type HASettings struct {
+	Enabled       bool   `json:"enabled"`
+	Role          string `json:"role"`
+	PeerName      string `json:"peer_name"`
+	PeerURL       string `json:"peer_url"`
+	PeerToken     string `json:"peer_token,omitempty"`
+	HasPeerToken  bool   `json:"has_peer_token"`
+	LastHeartbeat string `json:"last_heartbeat"`
+	LastSync      string `json:"last_sync"`
+	LastStatus    string `json:"last_status"`
+}
+
+type HAStatus struct {
+	Status      string `json:"status"`
+	PeerURL     string `json:"peer_url"`
+	PeerVersion string `json:"peer_version,omitempty"`
+	PeerRole    string `json:"peer_role,omitempty"`
+	Error       string `json:"error,omitempty"`
+	CheckedAt   string `json:"checked_at"`
+}
+
+type HAHealth struct {
+	Enabled             bool   `json:"enabled"`
+	Role                string `json:"role"`
+	PeerName            string `json:"peer_name"`
+	PeerURL             string `json:"peer_url"`
+	Status              string `json:"status"`
+	LastHeartbeat       string `json:"last_heartbeat"`
+	LastSync            string `json:"last_sync"`
+	HeartbeatAgeSeconds int64  `json:"heartbeat_age_seconds"`
+	Stale               bool   `json:"stale"`
+	Configured          bool   `json:"configured"`
+}
+
+type HASyncPayload struct {
+	StaticRecords     []StaticRecord    `json:"static_records"`
+	Rules             []Rule            `json:"rules"`
+	BlocklistPresets  []BlocklistPreset `json:"blocklist_presets"`
+	BlocklistSources  []BlocklistSource `json:"blocklist_sources"`
+	RetentionSettings RetentionSettings `json:"retention_settings"`
+	SyncedAt          string            `json:"synced_at"`
+}
+
+type HASyncResult struct {
+	Status           string `json:"status"`
+	PeerURL          string `json:"peer_url"`
+	StaticRecords    int    `json:"static_records"`
+	Rules            int    `json:"rules"`
+	BlocklistPresets int    `json:"blocklist_presets"`
+	BlocklistSources int    `json:"blocklist_sources"`
+	Error            string `json:"error,omitempty"`
+}
+
 type uniFiClient struct {
 	IP       string
 	Hostname string
@@ -1299,6 +1352,161 @@ func (s *Store) Retention(ctx context.Context) (RetentionSettings, error) {
 	return settings, nil
 }
 
+func (s *Store) HASettings(ctx context.Context) (HASettings, error) {
+	settings := HASettings{Role: "primary"}
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM settings WHERE key LIKE 'ha.%'`)
+	if err != nil {
+		return settings, err
+	}
+	defer rows.Close()
+	values := map[string]string{}
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return settings, err
+		}
+		values[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return settings, err
+	}
+	settings.Enabled = values["ha.enabled"] == "true"
+	if values["ha.role"] != "" {
+		settings.Role = values["ha.role"]
+	}
+	settings.PeerName = values["ha.peer_name"]
+	settings.PeerURL = values["ha.peer_url"]
+	settings.PeerToken = s.decryptSecret(values["ha.peer_token"])
+	settings.HasPeerToken = settings.PeerToken != ""
+	settings.LastHeartbeat = values["ha.last_heartbeat"]
+	settings.LastSync = values["ha.last_sync"]
+	settings.LastStatus = values["ha.last_status"]
+	return settings, nil
+}
+
+func (s *Store) SaveHASettings(ctx context.Context, settings HASettings) (HASettings, error) {
+	settings.Role = strings.ToLower(strings.TrimSpace(settings.Role))
+	settings.PeerName = strings.TrimSpace(settings.PeerName)
+	settings.PeerURL = strings.TrimRight(strings.TrimSpace(settings.PeerURL), "/")
+	settings.PeerToken = strings.TrimSpace(settings.PeerToken)
+	if settings.Role == "" {
+		settings.Role = "primary"
+	}
+	if settings.Role != "primary" && settings.Role != "secondary" {
+		return HASettings{}, errors.New("role must be primary or secondary")
+	}
+	if settings.PeerURL != "" {
+		parsed, err := url.Parse(settings.PeerURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return HASettings{}, errors.New("peer_url must be a full http:// or https:// URL")
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return HASettings{}, err
+	}
+	defer tx.Rollback()
+	pairs := map[string]string{
+		"ha.enabled":   fmt.Sprintf("%t", settings.Enabled),
+		"ha.role":      settings.Role,
+		"ha.peer_name": settings.PeerName,
+		"ha.peer_url":  settings.PeerURL,
+	}
+	if settings.PeerToken != "" {
+		encrypted, err := s.encryptSecret(settings.PeerToken)
+		if err != nil {
+			return HASettings{}, err
+		}
+		pairs["ha.peer_token"] = encrypted
+	}
+	for key, value := range pairs {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value); err != nil {
+			return HASettings{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return HASettings{}, err
+	}
+	_ = s.Audit(ctx, "ha.settings", settings.PeerURL, fmt.Sprintf("enabled=%t role=%s", settings.Enabled, settings.Role))
+	out, err := s.HASettings(ctx)
+	if err != nil {
+		return HASettings{}, err
+	}
+	out.PeerToken = ""
+	return out, nil
+}
+
+func (s *Store) TestHAPeer(ctx context.Context) (HAStatus, error) {
+	settings, err := s.HASettings(ctx)
+	if err != nil {
+		return HAStatus{}, err
+	}
+	status := HAStatus{Status: "disabled", PeerURL: settings.PeerURL, CheckedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	if !settings.Enabled {
+		_ = s.setSetting(ctx, "ha.last_status", status.Status)
+		return status, nil
+	}
+	if settings.PeerURL == "" {
+		status.Status = "error"
+		status.Error = "peer URL is required"
+		_ = s.setSetting(ctx, "ha.last_status", status.Error)
+		return status, nil
+	}
+	if settings.PeerToken == "" {
+		status.Status = "error"
+		status.Error = "peer token is required"
+		_ = s.setSetting(ctx, "ha.last_status", status.Error)
+		return status, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, settings.PeerURL+"/api/ha/heartbeat", nil)
+	if err != nil {
+		return status, err
+	}
+	req.Header.Set("Authorization", "Bearer "+settings.PeerToken)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		status.Status = "error"
+		status.Error = err.Error()
+		_ = s.setSetting(ctx, "ha.last_status", status.Error)
+		return status, nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		status.Status = "error"
+		status.Error = resp.Status
+		_ = s.setSetting(ctx, "ha.last_status", status.Error)
+		return status, nil
+	}
+	var body struct {
+		Version struct {
+			Version string `json:"version"`
+		} `json:"version"`
+		HA HAHealth `json:"ha"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	status.Status = "ok"
+	status.PeerVersion = body.Version.Version
+	status.PeerRole = body.HA.Role
+	_ = s.setSetting(ctx, "ha.last_heartbeat", status.CheckedAt)
+	_ = s.setSetting(ctx, "ha.last_status", "ok")
+	return status, nil
+}
+
+func (s *Store) ValidateHAImportAllowed(ctx context.Context) error {
+	settings, err := s.HASettings(ctx)
+	if err != nil {
+		return err
+	}
+	if !settings.Enabled {
+		return errors.New("secondary DNS sync is not enabled on this node")
+	}
+	if settings.Role != "secondary" {
+		return errors.New("this node is not configured to receive HA policy sync")
+	}
+	return nil
+}
+
 func (s *Store) RetentionDays(ctx context.Context) int {
 	var raw string
 	_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'retention.days'`).Scan(&raw)
@@ -1321,6 +1529,415 @@ func (s *Store) SetRetention(ctx context.Context, days int) (RetentionSettings, 
 	}
 	_ = s.Audit(ctx, "retention.update", "query_events", fmt.Sprintf("%d days", days))
 	return s.Retention(ctx)
+}
+
+func (s *Store) ExportHASyncPayload(ctx context.Context) (HASyncPayload, error) {
+	records, err := s.StaticRecords(ctx)
+	if err != nil {
+		return HASyncPayload{}, err
+	}
+	rules, err := s.Rules(ctx)
+	if err != nil {
+		return HASyncPayload{}, err
+	}
+	presets, err := s.BlocklistPresets(ctx)
+	if err != nil {
+		return HASyncPayload{}, err
+	}
+	sources, err := s.BlocklistSources(ctx)
+	if err != nil {
+		return HASyncPayload{}, err
+	}
+	retention, err := s.Retention(ctx)
+	if err != nil {
+		return HASyncPayload{}, err
+	}
+	return HASyncPayload{
+		StaticRecords:     records,
+		Rules:             rules,
+		BlocklistPresets:  presets,
+		BlocklistSources:  sources,
+		RetentionSettings: retention,
+		SyncedAt:          time.Now().UTC().Format(time.RFC3339Nano),
+	}, nil
+}
+
+func (s *Store) ApplyHASyncPayload(ctx context.Context, payload HASyncPayload) (HASyncResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return HASyncResult{}, err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	recordKeys := map[string]struct{}{}
+	for _, record := range payload.StaticRecords {
+		name := NormalizeName(record.Name)
+		recordType := strings.ToUpper(strings.TrimSpace(record.Type))
+		if name == "" || recordType == "" || strings.TrimSpace(record.Value) == "" {
+			continue
+		}
+		recordKeys[name+"\x00"+recordType] = struct{}{}
+		if record.TTL <= 0 {
+			record.TTL = 60
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO static_records(name, type, value, ttl, created_at)
+			VALUES(?, ?, ?, ?, ?)
+			ON CONFLICT(name, type) DO UPDATE SET value = excluded.value, ttl = excluded.ttl`,
+			name, recordType, strings.TrimSpace(record.Value), record.TTL, now); err != nil {
+			return HASyncResult{}, err
+		}
+	}
+	if err := deleteMissingStaticRecords(ctx, tx, recordKeys); err != nil {
+		return HASyncResult{}, err
+	}
+	ruleKeys := map[string]struct{}{}
+	for _, rule := range payload.Rules {
+		target := NormalizeName(rule.Target)
+		action := strings.ToLower(strings.TrimSpace(rule.Action))
+		if target == "" || (action != "block" && action != "allow") {
+			continue
+		}
+		ruleKeys["global\x00"+target+"\x00"+action] = struct{}{}
+		enabled := 0
+		if rule.Enabled {
+			enabled = 1
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO rules(scope, target, action, enabled, note, created_at)
+			VALUES('global', ?, ?, ?, ?, ?)
+			ON CONFLICT(scope, target, action) DO UPDATE SET enabled = excluded.enabled, note = excluded.note`,
+			target, action, enabled, rule.Note, now); err != nil {
+			return HASyncResult{}, err
+		}
+	}
+	if err := deleteMissingRules(ctx, tx, ruleKeys); err != nil {
+		return HASyncResult{}, err
+	}
+	for _, preset := range payload.BlocklistPresets {
+		if strings.TrimSpace(preset.ID) == "" {
+			continue
+		}
+		enabled := 0
+		if preset.Enabled {
+			enabled = 1
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO blocklist_presets(id, name, tier, description, home_url, source_url, enabled, created_at, updated_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at`,
+			preset.ID, preset.Name, preset.Tier, preset.Description, preset.HomeURL, preset.SourceURL, enabled, now, now); err != nil {
+			return HASyncResult{}, err
+		}
+	}
+	sourceURLs := map[string]struct{}{}
+	for _, source := range payload.BlocklistSources {
+		source.URL = strings.TrimSpace(source.URL)
+		if source.URL == "" {
+			continue
+		}
+		if err := validateHAImportedBlocklistSource(source); err != nil {
+			return HASyncResult{}, err
+		}
+		sourceURLs[source.URL] = struct{}{}
+		enabled := 0
+		if source.Enabled {
+			enabled = 1
+		}
+		format := strings.ToLower(strings.TrimSpace(source.Format))
+		if format == "" {
+			format = "domains"
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO blocklist_sources(name, url, format, enabled, created_at)
+			VALUES(?, ?, ?, ?, ?)
+			ON CONFLICT(url) DO UPDATE SET name = excluded.name, format = excluded.format, enabled = excluded.enabled`,
+			source.Name, source.URL, format, enabled, now); err != nil {
+			return HASyncResult{}, err
+		}
+	}
+	if err := deleteMissingBlocklistSources(ctx, tx, sourceURLs); err != nil {
+		return HASyncResult{}, err
+	}
+	if payload.RetentionSettings.Days > 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES('retention.days', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, strconv.Itoa(payload.RetentionSettings.Days)); err != nil {
+			return HASyncResult{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return HASyncResult{}, err
+	}
+	s.invalidateStaticCache()
+	s.invalidateRuleCache()
+	s.invalidateBlocklistCache()
+	_ = s.setSetting(ctx, "ha.last_sync", now)
+	_ = s.setSetting(ctx, "ha.last_status", "sync received")
+	_ = s.Audit(ctx, "ha.sync.receive", "peer", fmt.Sprintf("records=%d rules=%d sources=%d", len(payload.StaticRecords), len(payload.Rules), len(payload.BlocklistSources)))
+	return HASyncResult{Status: "ok", StaticRecords: len(payload.StaticRecords), Rules: len(payload.Rules), BlocklistPresets: len(payload.BlocklistPresets), BlocklistSources: len(payload.BlocklistSources)}, nil
+}
+
+func deleteMissingStaticRecords(ctx context.Context, tx *sql.Tx, keep map[string]struct{}) error {
+	rows, err := tx.QueryContext(ctx, `SELECT name, type FROM static_records`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type key struct {
+		name       string
+		recordType string
+	}
+	var remove []key
+	for rows.Next() {
+		var item key
+		if err := rows.Scan(&item.name, &item.recordType); err != nil {
+			return err
+		}
+		if _, ok := keep[item.name+"\x00"+item.recordType]; !ok {
+			remove = append(remove, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range remove {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM static_records WHERE name = ? AND type = ?`, item.name, item.recordType); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteMissingRules(ctx context.Context, tx *sql.Tx, keep map[string]struct{}) error {
+	rows, err := tx.QueryContext(ctx, `SELECT scope, target, action FROM rules`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type key struct {
+		scope  string
+		target string
+		action string
+	}
+	var remove []key
+	for rows.Next() {
+		var item key
+		if err := rows.Scan(&item.scope, &item.target, &item.action); err != nil {
+			return err
+		}
+		if _, ok := keep[item.scope+"\x00"+item.target+"\x00"+item.action]; !ok {
+			remove = append(remove, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range remove {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM rules WHERE scope = ? AND target = ? AND action = ?`, item.scope, item.target, item.action); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteMissingBlocklistSources(ctx context.Context, tx *sql.Tx, keep map[string]struct{}) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id, url FROM blocklist_sources`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type source struct {
+		id  int64
+		url string
+	}
+	var remove []source
+	for rows.Next() {
+		var item source
+		if err := rows.Scan(&item.id, &item.url); err != nil {
+			return err
+		}
+		if _, ok := keep[item.url]; !ok {
+			remove = append(remove, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range remove {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM blocklist_entries WHERE source_type = 'custom' AND source_id = ?`, fmt.Sprintf("%d", item.id)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM blocklist_sources WHERE id = ?`, item.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateHAImportedBlocklistSource(source BlocklistSource) error {
+	parsed, err := url.Parse(source.URL)
+	if err != nil || parsed.Scheme == "" || parsed.Hostname() == "" {
+		return errors.New("imported blocklist source has invalid url")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("imported blocklist source url must use http or https")
+	}
+	format := strings.ToLower(strings.TrimSpace(source.Format))
+	if format != "" && format != "domains" && format != "hosts" && format != "adguard" {
+		return errors.New("imported blocklist source format must be domains, hosts, or adguard")
+	}
+	return nil
+}
+
+func (s *Store) PushHASync(ctx context.Context) (HASyncResult, error) {
+	return s.pushHASync(ctx, true)
+}
+
+func (s *Store) pushHASync(ctx context.Context, audit bool) (HASyncResult, error) {
+	settings, err := s.HASettings(ctx)
+	if err != nil {
+		return HASyncResult{}, err
+	}
+	result := HASyncResult{Status: "disabled", PeerURL: settings.PeerURL}
+	if !settings.Enabled {
+		return result, nil
+	}
+	if settings.PeerURL == "" || settings.PeerToken == "" {
+		result.Status = "error"
+		result.Error = "peer URL and token are required"
+		_ = s.setSetting(ctx, "ha.last_status", result.Error)
+		return result, nil
+	}
+	payload, err := s.ExportHASyncPayload(ctx)
+	if err != nil {
+		return HASyncResult{}, err
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return HASyncResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, settings.PeerURL+"/api/ha/import", strings.NewReader(string(body)))
+	if err != nil {
+		return HASyncResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+settings.PeerToken)
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		result.Status = "error"
+		result.Error = err.Error()
+		_ = s.setSetting(ctx, "ha.last_status", result.Error)
+		return result, nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		result.Status = "error"
+		result.Error = resp.Status
+		_ = s.setSetting(ctx, "ha.last_status", result.Error)
+		return result, nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return HASyncResult{}, err
+	}
+	result.PeerURL = settings.PeerURL
+	_ = s.setSetting(ctx, "ha.last_sync", time.Now().UTC().Format(time.RFC3339Nano))
+	_ = s.setSetting(ctx, "ha.last_status", "sync pushed")
+	if audit {
+		_ = s.Audit(ctx, "ha.sync.push", settings.PeerURL, fmt.Sprintf("records=%d rules=%d sources=%d", result.StaticRecords, result.Rules, result.BlocklistSources))
+	}
+	return result, nil
+}
+
+func (s *Store) HAHealth(ctx context.Context) (HAHealth, error) {
+	settings, err := s.HASettings(ctx)
+	if err != nil {
+		return HAHealth{}, err
+	}
+	health := HAHealth{
+		Enabled:       settings.Enabled,
+		Role:          settings.Role,
+		PeerName:      settings.PeerName,
+		PeerURL:       settings.PeerURL,
+		Status:        settings.LastStatus,
+		LastHeartbeat: settings.LastHeartbeat,
+		LastSync:      settings.LastSync,
+		Configured:    settings.PeerURL != "" && settings.HasPeerToken,
+	}
+	if health.Status == "" {
+		health.Status = "not checked"
+	}
+	if settings.LastHeartbeat != "" {
+		if ts, err := time.Parse(time.RFC3339Nano, settings.LastHeartbeat); err == nil {
+			health.HeartbeatAgeSeconds = int64(time.Since(ts).Seconds())
+			health.Stale = settings.Enabled && health.HeartbeatAgeSeconds > 180
+		}
+	} else if settings.Enabled {
+		health.Stale = true
+	}
+	return health, nil
+}
+
+func (s *Store) StartHAWorker(ctx context.Context, logger *slog.Logger) {
+	go func() {
+		heartbeatTicker := time.NewTicker(1 * time.Minute)
+		syncTicker := time.NewTicker(5 * time.Minute)
+		defer heartbeatTicker.Stop()
+		defer syncTicker.Stop()
+
+		runHeartbeat := func() {
+			runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			settings, err := s.HASettings(runCtx)
+			if err != nil {
+				logger.Warn("ha settings load failed", "error", err)
+				return
+			}
+			if !settings.Enabled || settings.PeerURL == "" {
+				return
+			}
+			status, err := s.TestHAPeer(runCtx)
+			if err != nil {
+				logger.Warn("ha heartbeat failed", "error", err)
+				return
+			}
+			if status.Status != "ok" {
+				logger.Warn("ha heartbeat unhealthy", "peer", status.PeerURL, "status", status.Status, "error", status.Error)
+				return
+			}
+			logger.Debug("ha heartbeat ok", "peer", status.PeerURL, "version", status.PeerVersion)
+		}
+
+		runSync := func() {
+			runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			settings, err := s.HASettings(runCtx)
+			if err != nil {
+				logger.Warn("ha settings load failed", "error", err)
+				return
+			}
+			if !settings.Enabled || settings.Role != "primary" || settings.PeerURL == "" {
+				return
+			}
+			result, err := s.pushHASync(runCtx, false)
+			if err != nil {
+				logger.Warn("ha sync failed", "error", err)
+				return
+			}
+			if result.Status != "ok" {
+				logger.Warn("ha sync unhealthy", "peer", result.PeerURL, "status", result.Status, "error", result.Error)
+				return
+			}
+			logger.Debug("ha sync ok", "peer", result.PeerURL, "rules", result.Rules, "records", result.StaticRecords, "sources", result.BlocklistSources)
+		}
+
+		runHeartbeat()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-heartbeatTicker.C:
+				runHeartbeat()
+			case <-syncTicker.C:
+				runSync()
+			}
+		}
+	}()
 }
 
 func (s *Store) PurgeOldEvents(ctx context.Context) (int64, error) {

@@ -119,11 +119,20 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/settings/unifi/import", s.unifiImport)
 	s.mux.HandleFunc("/api/settings/retention", s.retentionSettings)
 	s.mux.HandleFunc("/api/settings/retention/purge", s.retentionPurge)
+	s.mux.HandleFunc("/api/ha/settings", s.haSettings)
+	s.mux.HandleFunc("/api/ha/heartbeat", s.haHeartbeat)
+	s.mux.HandleFunc("/api/ha/test", s.haTest)
+	s.mux.HandleFunc("/api/ha/sync", s.haSync)
+	s.mux.HandleFunc("/api/ha/import", s.haImport)
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ok, cookieAuth := s.authorized(r)
+		if s.isProtectedHAPath(r.URL.Path) && !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		if s.isPublicPath(r.URL.Path) || isLoopbackRequest(r) || ok {
 			if ok && cookieAuth && !sameOriginUnsafeRequest(r) {
 				http.Error(w, "invalid request origin", http.StatusForbidden)
@@ -142,6 +151,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) isPublicPath(path string) bool {
 	return path == "/" || path == "/api/health" || path == "/api/auth/status" || path == "/api/auth/login"
+}
+
+func (s *Server) isProtectedHAPath(path string) bool {
+	return path == "/api/ha/heartbeat" || path == "/api/ha/import"
 }
 
 func (s *Server) authorized(r *http.Request) (bool, bool) {
@@ -259,7 +272,12 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, map[string]any{"dashboard": d, "dns": s.dns.Status(), "system": s.systemStats(), "version": version.Info()})
+	ha, err := s.store.HAHealth(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"dashboard": d, "dns": s.dns.Status(), "system": s.systemStats(), "version": version.Info(), "ha": ha})
 }
 
 func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
@@ -270,6 +288,11 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 	dnsStatus := s.dns.Status()
 	system := s.systemStats()
+	ha, err := s.store.HAHealth(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	warnings := []string{}
 	if dnsStatus.DroppedEvents > 0 {
 		warnings = append(warnings, "DNS query events have been dropped. Increase event queue capacity or reduce dashboard/report load.")
@@ -283,11 +306,18 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(s.cfg.HTTPAddr, "0.0.0.0:") {
 		warnings = append(warnings, "Admin HTTP is reachable on LAN interfaces. Use a strong admin token and prefer trusted management networks.")
 	}
+	if ha.Enabled && !ha.Configured {
+		warnings = append(warnings, "Secondary DNS is enabled but peer URL or token is missing.")
+	}
+	if ha.Enabled && ha.Stale {
+		warnings = append(warnings, "Secondary DNS heartbeat is stale or has never succeeded.")
+	}
 	writeJSON(w, map[string]any{
 		"ok":        len(warnings) == 0,
 		"dns":       dnsStatus,
 		"dashboard": d,
 		"system":    system,
+		"ha":        ha,
 		"version":   version.Info(),
 		"config": map[string]any{
 			"dns_addr":        s.cfg.DNSAddr,
@@ -686,6 +716,94 @@ func (s *Server) retentionPurge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "removed": count})
+}
+
+func (s *Server) haSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := s.store.HASettings(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		settings.PeerToken = ""
+		writeJSON(w, settings)
+	case http.MethodPut:
+		var body store.HASettings
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, err)
+			return
+		}
+		settings, err := s.store.SaveHASettings(r.Context(), body)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, settings)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) haHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	health, err := s.store.HAHealth(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "version": version.Info(), "ha": health})
+}
+
+func (s *Server) haTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	result, err := s.store.TestHAPeer(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, result)
+}
+
+func (s *Server) haSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	result, err := s.store.PushHASync(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, result)
+}
+
+func (s *Server) haImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.store.ValidateHAImportAllowed(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	var payload store.HASyncPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := s.store.ApplyHASyncPayload(r.Context(), payload)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, result)
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

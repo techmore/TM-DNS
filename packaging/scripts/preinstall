@@ -8,16 +8,6 @@ backup_dir="${app_dir}/rollback"
 
 mkdir -p "${backup_dir}"
 
-port53_owners="$(/usr/sbin/lsof -nP -iTCP:53 -sTCP:LISTEN -iUDP:53 2>/dev/null | awk 'NR > 1 {print $1 ":" $2}' | sort -u || true)"
-if [[ -n "${port53_owners}" ]]; then
-	if ! echo "${port53_owners}" | grep -q '^tmdns:'; then
-		echo "TM-DNS installer stopped: port 53 is already owned by another process:" >&2
-		echo "${port53_owners}" >&2
-		echo "Stop the conflicting DNS service before installing TM-DNS." >&2
-		exit 1
-	fi
-fi
-
 if [[ -f "${app_dir}/tmdns" ]]; then
 	cp -p "${app_dir}/tmdns" "${backup_dir}/tmdns.previous" >/dev/null 2>&1 || true
 fi
@@ -28,9 +18,19 @@ fi
 
 for pid in $(pgrep -x tmdns 2>/dev/null || true); do
 	command="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
-	if [[ -n "${command}" && "${command}" != /Library/Application\ Support/TM-DNS/tmdns* ]]; then
+	if [[ -n "${command}" && "${command}" == /Library/Application\ Support/TM-DNS/tmdns* ]]; then
 		kill "${pid}" >/dev/null 2>&1 || true
 	fi
 done
+
+sleep 1
+
+port53_owners="$(/usr/sbin/lsof -nP -iTCP:53 -sTCP:LISTEN -iUDP:53 2>/dev/null | awk 'NR > 1 {print $1 ":" $2}' | sort -u || true)"
+if [[ -n "${port53_owners}" ]]; then
+	echo "TM-DNS installer stopped: port 53 is already owned by another process:" >&2
+	echo "${port53_owners}" >&2
+	echo "Stop the conflicting DNS service before installing TM-DNS." >&2
+	exit 1
+fi
 
 exit 0

@@ -104,6 +104,9 @@ func TestAPIHostReportAndRuleCreation(t *testing.T) {
 	if _, ok := diagnostics["warnings"]; !ok {
 		t.Fatal("diagnostics missing warnings")
 	}
+	if _, ok := diagnostics["ha"]; !ok {
+		t.Fatal("diagnostics missing ha health")
+	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/blocklist-presets", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
@@ -138,6 +141,109 @@ func TestAPIHostReportAndRuleCreation(t *testing.T) {
 	srv.server.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("preset toggle status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/api/ha/settings", strings.NewReader(`{"enabled":true,"role":"primary","peer_name":"Secondary","peer_url":"http://192.0.2.11:8080","peer_token":"peer-secret"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	srv.server.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ha settings status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var haSettings store.HASettings
+	if err := json.NewDecoder(rec.Body).Decode(&haSettings); err != nil {
+		t.Fatalf("decode ha settings: %v", err)
+	}
+	if !haSettings.Enabled || !haSettings.HasPeerToken || haSettings.PeerToken != "" {
+		t.Fatalf("unexpected ha settings: %+v", haSettings)
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/api/ha/settings", strings.NewReader(`{"enabled":true,"role":"secondary","peer_name":"Primary","peer_url":"http://192.0.2.10:8080","peer_token":"peer-secret"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	srv.server.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("secondary ha settings status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/ha/import", strings.NewReader(`{"static_records":[{"name":"peer.test","type":"A","value":"192.0.2.99","ttl":60}],"rules":[{"target":"peer-block.test","action":"block","enabled":true,"note":"peer"}],"blocklist_presets":[],"blocklist_sources":[],"retention_settings":{"days":30}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	srv.server.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ha import status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHAHeartbeatAndSyncRequirePeerAuthAndReceiverRole(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+	secondaryStore, err := store.Open(ctx, t.TempDir()+"/secondary.db", logger)
+	if err != nil {
+		t.Fatalf("open secondary store: %v", err)
+	}
+	t.Cleanup(func() { _ = secondaryStore.Close() })
+	if err := secondaryStore.SeedDefaults(ctx); err != nil {
+		t.Fatalf("seed secondary: %v", err)
+	}
+	secondaryCfg := config.Config{DNSAddr: "127.0.0.1:1053", HTTPAddr: "127.0.0.1:8080", DBPath: "secondary.db", Upstream: "1.1.1.1:53", EventQueueCap: 10, AdminToken: "shared-secret"}
+	secondarySrv := New(secondaryCfg, secondaryStore, dnsserver.New(secondaryCfg, secondaryStore, logger), logger)
+	secondaryHTTP := httptest.NewServer(secondarySrv.server.Handler)
+	t.Cleanup(secondaryHTTP.Close)
+
+	if _, err := secondaryStore.SaveHASettings(ctx, store.HASettings{Enabled: true, Role: "secondary", PeerName: "Primary", PeerURL: "http://primary.invalid:8080", PeerToken: "shared-secret"}); err != nil {
+		t.Fatalf("save secondary ha: %v", err)
+	}
+
+	primaryStore, err := store.Open(ctx, t.TempDir()+"/primary.db", logger)
+	if err != nil {
+		t.Fatalf("open primary store: %v", err)
+	}
+	t.Cleanup(func() { _ = primaryStore.Close() })
+	if err := primaryStore.SeedDefaults(ctx); err != nil {
+		t.Fatalf("seed primary: %v", err)
+	}
+	if err := primaryStore.UpsertStaticRecord(ctx, store.StaticRecord{Name: "sync.test", Type: "A", Value: "192.0.2.44", TTL: 60}); err != nil {
+		t.Fatalf("primary record: %v", err)
+	}
+	if _, err := primaryStore.AddRule(ctx, "deny-sync.test", "block", "ha"); err != nil {
+		t.Fatalf("primary rule: %v", err)
+	}
+
+	if _, err := primaryStore.SaveHASettings(ctx, store.HASettings{Enabled: true, Role: "primary", PeerName: "Secondary", PeerURL: secondaryHTTP.URL, PeerToken: "wrong-secret"}); err != nil {
+		t.Fatalf("save primary wrong ha: %v", err)
+	}
+	status, err := primaryStore.TestHAPeer(ctx)
+	if err != nil {
+		t.Fatalf("test wrong peer: %v", err)
+	}
+	if status.Status != "error" {
+		t.Fatalf("wrong token heartbeat status = %+v, want error", status)
+	}
+
+	if _, err := primaryStore.SaveHASettings(ctx, store.HASettings{Enabled: true, Role: "primary", PeerName: "Secondary", PeerURL: secondaryHTTP.URL, PeerToken: "shared-secret"}); err != nil {
+		t.Fatalf("save primary ha: %v", err)
+	}
+	status, err = primaryStore.TestHAPeer(ctx)
+	if err != nil {
+		t.Fatalf("test peer: %v", err)
+	}
+	if status.Status != "ok" || status.PeerRole != "secondary" {
+		t.Fatalf("heartbeat status = %+v, want ok secondary", status)
+	}
+	result, err := primaryStore.PushHASync(ctx)
+	if err != nil {
+		t.Fatalf("push sync: %v", err)
+	}
+	if result.Status != "ok" || result.StaticRecords == 0 || result.Rules == 0 {
+		t.Fatalf("sync result = %+v", result)
+	}
+	if rule, err := secondaryStore.MatchRule(ctx, "deny-sync.test"); err != nil || rule == nil || !rule.Enabled {
+		t.Fatalf("secondary synced rule = %+v err=%v", rule, err)
 	}
 }
 

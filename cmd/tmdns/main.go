@@ -54,6 +54,7 @@ func main() {
 			}
 		}
 	}()
+	db.StartHAWorker(ctx, logger)
 
 	resolver := dnsserver.New(cfg, db, logger)
 	api := htt_server.New(cfg, db, resolver, logger)
