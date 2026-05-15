@@ -315,10 +315,18 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 		warnings = append(warnings, "Admin HTTP is reachable on LAN interfaces. Use a strong admin token and prefer trusted management networks.")
 	}
 	if ha.Enabled && !ha.Configured {
-		warnings = append(warnings, "Secondary DNS is enabled but peer URL or token is missing.")
+		if ha.Role == "secondary" {
+			warnings = append(warnings, "This Secondary DNS is enabled but is not paired to a Primary.")
+		} else {
+			warnings = append(warnings, "Primary DNS is enabled but no Secondary peer is paired.")
+		}
 	}
 	if ha.Enabled && ha.Stale {
-		warnings = append(warnings, "Secondary DNS heartbeat is stale or has never succeeded.")
+		if ha.Role == "secondary" {
+			warnings = append(warnings, "Primary DNS heartbeat is stale or has never succeeded.")
+		} else {
+			warnings = append(warnings, "Secondary DNS heartbeat is stale or has never succeeded.")
+		}
 	}
 	writeJSON(w, map[string]any{
 		"ok":        len(warnings) == 0,

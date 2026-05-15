@@ -162,7 +162,8 @@ function renderMetrics() {
   const d = state.dashboard?.dashboard || {};
   const dns = state.dashboard?.dns || {};
   const v = state.dashboard?.version || {};
-  $("#statusText").textContent = dns.dns_addr ? 'healthy on '+dns.dns_addr+' · '+(v.version||'dev') : 'loading';
+  const role = state.dashboard?.ha?.role === 'secondary' ? 'Secondary DNS' : 'Primary DNS';
+  $("#statusText").textContent = dns.dns_addr ? role+' · healthy on '+dns.dns_addr+' · '+(v.version||'dev') : role+' · loading';
   renderHAChip();
   $("#metrics").innerHTML = [
     ["Queries Today", d.queries_today || 0],
@@ -175,16 +176,31 @@ function renderMetrics() {
 function haWarningDetail() {
   const ha = state.dashboard?.ha;
   if (!ha) return "TM-DNS cannot confirm secondary DNS health yet. A single DNS server can take the network offline if this Mac is restarted, asleep, disconnected, or updating.";
-  if (!ha.enabled) return "Secondary DNS is not enabled. Put a second onsite TM-DNS server in DHCP as backup DNS before relying on this for production.";
-  if (!ha.configured) return "Secondary DNS is enabled but peer URL or peer token is missing. Complete peer setup, then run Heartbeat and Push Sync.";
-  if (ha.stale) return "Secondary DNS heartbeat is stale. Check the peer Mac, network path, admin token, and firewall access before making network-wide DNS changes.";
+  const secondary = ha.role === 'secondary';
+  if (!ha.enabled) return secondary ? "This node is marked Secondary, but redundancy is disabled. Accept pairing from the Primary or enable HA before using it as backup DNS." : "Secondary DNS is not enabled. Put a second onsite TM-DNS server in DHCP as backup DNS before relying on this for production.";
+  if (!ha.configured) return secondary ? "This Secondary is not paired to a Primary yet. Request join from this Mac, then accept it on the Primary dashboard." : "Primary DNS is enabled but no Secondary peer is paired yet. Accept a secondary join request, then run Heartbeat and Push Sync.";
+  if (ha.stale) return secondary ? "Primary DNS heartbeat is stale. Check the primary Mac, network path, admin token, and firewall access before relying on failover." : "Secondary DNS heartbeat is stale. Check the peer Mac, network path, admin token, and firewall access before making network-wide DNS changes.";
   return "";
+}
+function haWarningLabel() {
+  const ha = state.dashboard?.ha;
+  if (!ha) return "HA unknown";
+  if (ha.role === 'secondary') {
+    if (!ha.enabled || !ha.configured) return "Secondary not paired";
+    if (ha.stale) return "Primary stale";
+    return "Secondary healthy";
+  }
+  if (!ha.enabled || !ha.configured) return "No secondary DNS";
+  if (ha.stale) return "Secondary stale";
+  return "Secondary healthy";
 }
 function renderHAChip() {
   const detail = haWarningDetail();
   const chip = $("#haChip");
   const help = $("#haHelp");
   if (!chip || !help) return;
+  const label = chip.querySelector("span:nth-child(2)");
+  if (label) label.textContent = haWarningLabel();
   chip.classList.toggle("visible", !!detail);
   if (!detail) {
     help.classList.remove("visible");
