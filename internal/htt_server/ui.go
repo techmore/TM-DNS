@@ -136,7 +136,7 @@ function pageFromHash() {
   return pages.includes(raw) ? raw : "Dashboard";
 }
 const initialPage = pageFromHash();
-let state = { page:initialPage, authed:false, dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], audit:[], hostReport:null, hostDetail:null, selectedHostID:initialHostID, unifi:null, retention:null, diagnostics:null, ha:null, haJoinRequests:[], lastFullLoad:0 };
+let state = { page:initialPage, authed:false, dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], audit:[], hostReport:null, hostDetail:null, selectedHostID:initialHostID, unifi:null, retention:null, diagnostics:null, ha:null, haJoinRequests:[], haDiscoveredNodes:[], lastFullLoad:0 };
 let blocklistPresets = [];
 let blocklistSources = [];
 const $ = s => document.querySelector(s);
@@ -259,6 +259,19 @@ function systemCards() {
     [['CPU', (s.cpu_percent ?? 0)+'%'], ['Memory', (s.resident_mb ?? 0)+' MB'], ['TM-DNS Storage', (s.app_storage_mb ?? 0)+' MB'], ['System Disk Used', (s.disk_used_percent ?? 0)+'%']].map(x => '<div><div class="metric-label">'+x[0]+'</div><div class="metric-value">'+x[1]+'</div></div>').join("")+
     '</div><p class="muted mono" style="margin-bottom:0">TM-DNS: DB '+(s.db_size_mb ?? 0)+' MB · WAL '+(s.wal_size_mb ?? 0)+' MB · SHM '+(s.shm_size_mb ?? 0)+' MB</p><p class="muted mono" style="margin:4px 0 0">System disk: '+(s.disk_used_gb ?? 0)+' GB used / '+(s.disk_total_gb ?? 0)+' GB · '+(s.disk_free_gb ?? 0)+' GB free · data '+(s.data_dir||'')+'</p></div>';
 }
+function haPairingCard() {
+  const pending = (state.haJoinRequests || []).filter(r => r.status === 'pending');
+  if (pending.length) {
+    return '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Secondary Join Requests</h2><span class="muted">approve before syncing</span></div>'+
+      pending.map(r => '<div class="row" style="gap:12px"><div style="min-width:0"><strong>'+esc(r.node_hostname || r.node_name || 'TM-DNS Secondary')+'</strong><div class="muted mono">'+esc([r.node_ip, r.node_mac, r.node_url].filter(Boolean).join(' · '))+'</div></div><button class="primary" onclick="acceptHAJoin(\''+esc(r.id)+'\')">Accept</button></div>').join("")+
+      '</div>';
+  }
+  const node = (state.haDiscoveredNodes || [])[0];
+  if (node && !(state.dashboard?.ha?.configured)) {
+    return '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Other TM-DNS detected</h2><span class="muted">'+esc(node.url)+'</span></div><div class="row"><div><strong>'+esc(node.hostname || node.name || 'TM-DNS')+'</strong><div class="muted mono">'+esc([node.ip, node.mac].filter(Boolean).join(' · '))+'</div></div><button class="primary" onclick="requestHAJoinTo(\''+esc(node.url)+'\')">Request Join</button></div></div>';
+  }
+  return '';
+}
 function toggleSwitch(checked, onChange) {
   return '<label class="switch"><input type="checkbox" '+(checked?'checked':'')+' onchange="'+onChange+'"><span class="slider"></span><span>'+(checked?'Enabled':'Disabled')+'</span></label>';
 }
@@ -272,7 +285,7 @@ function blocklistSourceCards() {
 function render() {
   renderTabs(); renderMetrics();
   const d = state.dashboard?.dashboard || {};
-  if (state.page === "Dashboard") $("#view").innerHTML = applianceWarning()+systemCards()+'<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Hosts</h2><span class="muted">name, DNS name, IP</span></div>'+topHostsList(d.top_hosts||[])+'</div><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">last 48 hours, one-click policy</span></div>'+topList(d.top_domains||[], {block:true})+'</div></div>';
+  if (state.page === "Dashboard") $("#view").innerHTML = applianceWarning()+systemCards()+haPairingCard()+'<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Hosts</h2><span class="muted">name, DNS name, IP</span></div>'+topHostsList(d.top_hosts||[])+'</div><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">last 48 hours, one-click policy</span></div>'+topList(d.top_domains||[], {block:true})+'</div></div>';
   if (state.page === "Realtime") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Firewall View</h2><span class="muted">auto-refreshes every 5s</span></div>'+eventsTable(state.realtime)+'</div>';
   if (state.page === "Blocked") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Blocked Attempts</h2><span class="muted">who, what, why, when</span></div>'+eventsTable(state.blocked)+'</div>';
   if (state.page === "Hosts") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Hosts</h2><span class="muted">click a host to open its detail view</span></div><div class="table-wrap"><table><thead><tr><th>Host</th><th>IP</th><th>MAC / Vendor</th><th>Identity</th><th>Last Seen</th><th>Queries</th><th>Blocks</th></tr></thead><tbody>'+state.hosts.map(h => '<tr class="clickable '+(state.selectedHostID===h.id?'selected':'')+'" onclick="selectHost('+h.id+')"><td><strong>'+esc(h.label||h.hostname||h.source_ip)+'</strong><div class="muted mono">'+esc(h.hostname||'hostname not learned yet')+'</div></td><td class="mono">'+esc(h.source_ip)+'</td><td class="mono">'+esc(h.mac||'')+'<div class="muted">'+esc(h.vendor||'')+'</div></td><td>'+esc(h.identity_confidence)+'<div class="muted mono">'+esc(h.identity_last_checked||'not checked yet')+'</div></td><td>'+h.last_seen+'</td><td>'+h.query_count+'</td><td>'+h.block_count+'</td></tr>').join("")+'</tbody></table></div></div>';
@@ -307,6 +320,7 @@ async function load(full = true) {
     state.diagnostics = await api('/api/diagnostics');
     state.ha = await api('/api/ha/settings');
     state.haJoinRequests = await api('/api/ha/join-requests');
+    state.haDiscoveredNodes = await api('/api/ha/discover');
     blocklistPresets = await api('/api/blocklist-presets');
     blocklistSources = await api('/api/blocklist-sources');
     state.hostReport = state.selectedHostID ? await api('/api/reports/host/'+state.selectedHostID) : null;
@@ -422,8 +436,13 @@ async function saveHA() {
   await load();
 }
 async function requestHAJoin() {
-  const result = await api($("#joinPrimaryURL").value.replace(/\/$/, '')+'/api/ha/join-requests', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({node_name:$("#joinNodeName").value || 'TM-DNS Secondary', node_url:$("#joinLocalURL").value, node_role:'secondary', node_version:(state.dashboard?.version?.version || 'unknown'), requester_token:$("#joinToken").value})});
+  const result = await api('/api/ha/request-join', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({primary_url:$("#joinPrimaryURL").value})});
   alert('Join request sent: '+result.status);
+}
+async function requestHAJoinTo(primaryURL) {
+  const result = await api('/api/ha/request-join', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({primary_url:primaryURL})});
+  alert('Join request sent: '+(result.status || 'pending'));
+  await load();
 }
 async function acceptHAJoin(id) {
   const result = await api('/api/ha/join-requests/accept', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id})});

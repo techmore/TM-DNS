@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -125,6 +126,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/ha/heartbeat", s.haHeartbeat)
 	s.mux.HandleFunc("/api/ha/discovery", s.haDiscovery)
 	s.mux.HandleFunc("/api/ha/discover", s.haDiscover)
+	s.mux.HandleFunc("/api/ha/request-join", s.haRequestJoin)
 	s.mux.HandleFunc("/api/ha/join-requests", s.haJoinRequests)
 	s.mux.HandleFunc("/api/ha/join-requests/accept", s.haJoinAccept)
 	s.mux.HandleFunc("/api/ha/test", s.haTest)
@@ -774,6 +776,9 @@ func (s *Server) haDiscovery(w http.ResponseWriter, r *http.Request) {
 		"ok":            true,
 		"name":          hostnameOrDefault(),
 		"url":           s.publicBaseURL(r),
+		"ip":            firstLANIPv4(),
+		"mac":           macForIP(firstLANIPv4()),
+		"hostname":      hostnameOrDefault(),
 		"role":          settings.Role,
 		"ha_enabled":    settings.Enabled,
 		"configured":    settings.PeerURL != "" && settings.HasPeerToken,
@@ -789,6 +794,57 @@ func (s *Server) haDiscover(w http.ResponseWriter, r *http.Request) {
 	}
 	nodes := discoverHANodes(r.Context())
 	writeJSON(w, nodes)
+}
+
+func (s *Server) haRequestJoin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		PrimaryURL string `json:"primary_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, err)
+		return
+	}
+	primaryURL := strings.TrimRight(strings.TrimSpace(body.PrimaryURL), "/")
+	u, err := url.Parse(primaryURL)
+	if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		writeError(w, errors.New("primary_url must be a full http:// or https:// URL"))
+		return
+	}
+	ip := firstLANIPv4()
+	payload := store.HAJoinRequestInput{
+		NodeName:       hostnameOrDefault(),
+		NodeURL:        s.publicBaseURL(r),
+		NodeIP:         ip,
+		NodeMAC:        macForIP(ip),
+		NodeHostname:   hostnameOrDefault(),
+		NodeRole:       "secondary",
+		NodeVersion:    version.Info()["version"],
+		RequesterToken: s.adminToken,
+	}
+	var buf strings.Builder
+	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		writeError(w, err)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, primaryURL+"/api/ha/join-requests", strings.NewReader(buf.String()))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 func (s *Server) haJoinRequests(w http.ResponseWriter, r *http.Request) {
@@ -934,6 +990,35 @@ func firstLANIPv4() string {
 				continue
 			}
 			return ip.String()
+		}
+	}
+	return ""
+}
+
+func macForIP(ip string) string {
+	if ip == "" {
+		return ""
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var local net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				local = v.IP
+			case *net.IPAddr:
+				local = v.IP
+			}
+			if local.To4() != nil && local.String() == ip {
+				return iface.HardwareAddr.String()
+			}
 		}
 	}
 	return ""

@@ -268,6 +268,9 @@ type HAJoinRequest struct {
 	ID             string `json:"id"`
 	NodeName       string `json:"node_name"`
 	NodeURL        string `json:"node_url"`
+	NodeIP         string `json:"node_ip"`
+	NodeMAC        string `json:"node_mac"`
+	NodeHostname   string `json:"node_hostname"`
 	NodeRole       string `json:"node_role"`
 	NodeVersion    string `json:"node_version"`
 	RequestedAt    string `json:"requested_at"`
@@ -279,6 +282,9 @@ type HAJoinRequest struct {
 type HAJoinRequestInput struct {
 	NodeName       string `json:"node_name"`
 	NodeURL        string `json:"node_url"`
+	NodeIP         string `json:"node_ip"`
+	NodeMAC        string `json:"node_mac"`
+	NodeHostname   string `json:"node_hostname"`
 	NodeRole       string `json:"node_role"`
 	NodeVersion    string `json:"node_version"`
 	RequesterToken string `json:"requester_token"`
@@ -1471,6 +1477,9 @@ func (s *Store) HAJoinRequests(ctx context.Context) ([]HAJoinRequest, error) {
 func (s *Store) SaveHAJoinRequest(ctx context.Context, input HAJoinRequestInput) (HAJoinRequest, error) {
 	input.NodeName = strings.TrimSpace(input.NodeName)
 	input.NodeURL = strings.TrimRight(strings.TrimSpace(input.NodeURL), "/")
+	input.NodeIP = strings.TrimSpace(input.NodeIP)
+	input.NodeMAC = normalizeMAC(input.NodeMAC)
+	input.NodeHostname = cleanHostname(input.NodeHostname)
 	input.NodeRole = strings.ToLower(strings.TrimSpace(input.NodeRole))
 	input.NodeVersion = strings.TrimSpace(input.NodeVersion)
 	input.RequesterToken = strings.TrimSpace(input.RequesterToken)
@@ -1506,6 +1515,9 @@ func (s *Store) SaveHAJoinRequest(ctx context.Context, input HAJoinRequestInput)
 		ID:             randomID(),
 		NodeName:       input.NodeName,
 		NodeURL:        input.NodeURL,
+		NodeIP:         input.NodeIP,
+		NodeMAC:        input.NodeMAC,
+		NodeHostname:   input.NodeHostname,
 		NodeRole:       input.NodeRole,
 		NodeVersion:    input.NodeVersion,
 		RequestedAt:    now,
