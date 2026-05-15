@@ -274,6 +274,26 @@ func TestAPIRequiresAuth(t *testing.T) {
 	}
 }
 
+func TestHARequestJoinRejectsPublicTarget(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	st, err := store.Open(ctx, t.TempDir()+"/join.db", logger)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := config.Config{DNSAddr: "127.0.0.1:1053", HTTPAddr: "127.0.0.1:8080", DBPath: "test.db", Upstream: "1.1.1.1:53", EventQueueCap: 10, AdminToken: "secret"}
+	srv := New(cfg, st, dnsserver.New(cfg, st, logger), logger)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/ha/request-join", strings.NewReader(`{"primary_url":"http://8.8.8.8:8080"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.server.Handler.ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("request join to public target unexpectedly succeeded: %s", rec.Body.String())
+	}
+}
+
 func TestAPILoopbackBypassesAuth(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))

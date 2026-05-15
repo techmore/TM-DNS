@@ -1548,6 +1548,23 @@ func (s *Store) SaveHAJoinRequest(ctx context.Context, input HAJoinRequestInput)
 }
 
 func (s *Store) AcceptHAJoinRequest(ctx context.Context, id string) (HAJoinRequest, error) {
+	request, err := s.HAJoinRequestForAccept(ctx, id)
+	if err != nil {
+		return HAJoinRequest{}, err
+	}
+	if _, err := s.SaveHASettings(ctx, HASettings{
+		Enabled:   true,
+		Role:      "primary",
+		PeerName:  request.NodeName,
+		PeerURL:   request.NodeURL,
+		PeerToken: request.RequesterToken,
+	}); err != nil {
+		return HAJoinRequest{}, err
+	}
+	return s.MarkHAJoinRequestAccepted(ctx, id)
+}
+
+func (s *Store) HAJoinRequestForAccept(ctx context.Context, id string) (HAJoinRequest, error) {
 	id = strings.TrimSpace(id)
 	requests, err := s.haJoinRequestsRaw(ctx)
 	if err != nil {
@@ -1564,14 +1581,26 @@ func (s *Store) AcceptHAJoinRequest(ctx context.Context, id string) (HAJoinReque
 		if token == "" {
 			return HAJoinRequest{}, errors.New("join request token is unavailable")
 		}
-		if _, err := s.SaveHASettings(ctx, HASettings{
-			Enabled:   true,
-			Role:      "primary",
-			PeerName:  requests[i].NodeName,
-			PeerURL:   requests[i].NodeURL,
-			PeerToken: token,
-		}); err != nil {
-			return HAJoinRequest{}, err
+		out := requests[i]
+		out.RequesterToken = token
+		out.HasToken = true
+		return out, nil
+	}
+	return HAJoinRequest{}, errors.New("join request not found")
+}
+
+func (s *Store) MarkHAJoinRequestAccepted(ctx context.Context, id string) (HAJoinRequest, error) {
+	id = strings.TrimSpace(id)
+	requests, err := s.haJoinRequestsRaw(ctx)
+	if err != nil {
+		return HAJoinRequest{}, err
+	}
+	for i := range requests {
+		if requests[i].ID != id {
+			continue
+		}
+		if requests[i].Status != "pending" {
+			return HAJoinRequest{}, errors.New("join request is not pending")
 		}
 		requests[i].Status = "accepted"
 		if err := s.saveHAJoinRequests(ctx, requests); err != nil {
@@ -1579,7 +1608,7 @@ func (s *Store) AcceptHAJoinRequest(ctx context.Context, id string) (HAJoinReque
 		}
 		_ = s.Audit(ctx, "ha.join.accept", requests[i].NodeURL, requests[i].NodeName)
 		out := requests[i]
-		out.RequesterToken = token
+		out.RequesterToken = ""
 		out.HasToken = true
 		return out, nil
 	}
@@ -1666,7 +1695,22 @@ func (s *Store) TestHAPeer(ctx context.Context) (HAStatus, error) {
 		} `json:"version"`
 		HA HAHealth `json:"ha"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		status.Status = "error"
+		status.Error = "invalid heartbeat response"
+		_ = s.setSetting(ctx, "ha.last_status", status.Error)
+		return status, nil
+	}
+	expectedRole := "secondary"
+	if settings.Role == "secondary" {
+		expectedRole = "primary"
+	}
+	if body.HA.Role != expectedRole {
+		status.Status = "error"
+		status.Error = "peer role is " + body.HA.Role + ", expected " + expectedRole
+		_ = s.setSetting(ctx, "ha.last_status", status.Error)
+		return status, nil
+	}
 	status.Status = "ok"
 	status.PeerVersion = body.Version.Version
 	status.PeerRole = body.HA.Role

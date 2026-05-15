@@ -822,6 +822,10 @@ func (s *Server) haRequestJoin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errors.New("primary_url must be a full http:// or https:// URL"))
 		return
 	}
+	if err := validateHAPairingTarget(r.Context(), u); err != nil {
+		writeError(w, err)
+		return
+	}
 	ip := firstLANIPv4()
 	payload := store.HAJoinRequestInput{
 		NodeName:       hostnameOrDefault(),
@@ -893,19 +897,23 @@ func (s *Server) haJoinAccept(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	accepted, err := s.store.AcceptHAJoinRequest(r.Context(), body.ID)
+	accepted, err := s.store.HAJoinRequestForAccept(r.Context(), body.ID)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	configureErr := s.configureAcceptedSecondary(r.Context(), accepted, s.publicBaseURL(r))
-	accepted.RequesterToken = ""
-	out := map[string]any{"status": "accepted", "request": accepted}
 	if configureErr != nil {
-		out["warning"] = configureErr.Error()
-	} else {
-		out["secondary_configured"] = true
+		http.Error(w, "secondary configuration failed: "+configureErr.Error(), http.StatusBadGateway)
+		return
 	}
+	accepted, err = s.store.AcceptHAJoinRequest(r.Context(), body.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	accepted.RequesterToken = ""
+	out := map[string]any{"status": "accepted", "request": accepted, "secondary_configured": true}
 	writeJSON(w, out)
 }
 
@@ -1030,6 +1038,55 @@ func macForIP(ip string) string {
 		}
 	}
 	return ""
+}
+
+func validateHAPairingTarget(ctx context.Context, u *url.URL) error {
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("primary_url host is required")
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return fmt.Errorf("primary_url host lookup failed: %w", err)
+	}
+	allowed := false
+	for _, addr := range ips {
+		ip := addr.IP
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || isLocalInterfaceIP(ip) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return errors.New("primary_url must resolve to a local or private LAN address")
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	probe := *u
+	probe.Path = "/api/ha/discovery"
+	probe.RawQuery = ""
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, probe.String(), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("primary_url is not reachable as TM-DNS: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("primary_url discovery returned %s", resp.Status)
+	}
+	var body struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || !body.OK {
+		return errors.New("primary_url did not return valid TM-DNS discovery metadata")
+	}
+	return nil
 }
 
 func discoverHANodes(ctx context.Context) []map[string]any {

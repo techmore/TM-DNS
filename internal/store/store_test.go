@@ -375,6 +375,42 @@ func TestHAHealthDetectsStaleHeartbeat(t *testing.T) {
 	}
 }
 
+func TestHAPeerHeartbeatRequiresValidJSONAndOppositeRole(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	badJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`not-json`))
+	}))
+	t.Cleanup(badJSON.Close)
+	if _, err := st.SaveHASettings(ctx, HASettings{Enabled: true, Role: "primary", PeerName: "Secondary", PeerURL: badJSON.URL, PeerToken: "secret"}); err != nil {
+		t.Fatalf("save bad json ha: %v", err)
+	}
+	status, err := st.TestHAPeer(ctx)
+	if err != nil {
+		t.Fatalf("test bad json peer: %v", err)
+	}
+	if status.Status != "error" || status.Error != "invalid heartbeat response" {
+		t.Fatalf("bad json heartbeat = %+v", status)
+	}
+
+	sameRole := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version":{"version":"test"},"ha":{"enabled":true,"role":"primary","configured":true}}`))
+	}))
+	t.Cleanup(sameRole.Close)
+	if _, err := st.SaveHASettings(ctx, HASettings{Enabled: true, Role: "primary", PeerName: "Secondary", PeerURL: sameRole.URL, PeerToken: "secret"}); err != nil {
+		t.Fatalf("save same role ha: %v", err)
+	}
+	status, err = st.TestHAPeer(ctx)
+	if err != nil {
+		t.Fatalf("test same role peer: %v", err)
+	}
+	if status.Status != "error" || !strings.Contains(status.Error, "expected secondary") {
+		t.Fatalf("same role heartbeat = %+v", status)
+	}
+}
+
 func TestParseBlocklistDomainsAndMatch(t *testing.T) {
 	input := `
 # comment
