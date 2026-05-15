@@ -264,6 +264,26 @@ type HASyncResult struct {
 	Error            string `json:"error,omitempty"`
 }
 
+type HAJoinRequest struct {
+	ID             string `json:"id"`
+	NodeName       string `json:"node_name"`
+	NodeURL        string `json:"node_url"`
+	NodeRole       string `json:"node_role"`
+	NodeVersion    string `json:"node_version"`
+	RequestedAt    string `json:"requested_at"`
+	Status         string `json:"status"`
+	RequesterToken string `json:"requester_token,omitempty"`
+	HasToken       bool   `json:"has_token"`
+}
+
+type HAJoinRequestInput struct {
+	NodeName       string `json:"node_name"`
+	NodeURL        string `json:"node_url"`
+	NodeRole       string `json:"node_role"`
+	NodeVersion    string `json:"node_version"`
+	RequesterToken string `json:"requester_token"`
+}
+
 type uniFiClient struct {
 	IP       string
 	Hostname string
@@ -1434,6 +1454,156 @@ func (s *Store) SaveHASettings(ctx context.Context, settings HASettings) (HASett
 	}
 	out.PeerToken = ""
 	return out, nil
+}
+
+func (s *Store) HAJoinRequests(ctx context.Context) ([]HAJoinRequest, error) {
+	requests, err := s.haJoinRequestsRaw(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range requests {
+		requests[i].RequesterToken = ""
+		requests[i].HasToken = true
+	}
+	return requests, nil
+}
+
+func (s *Store) SaveHAJoinRequest(ctx context.Context, input HAJoinRequestInput) (HAJoinRequest, error) {
+	input.NodeName = strings.TrimSpace(input.NodeName)
+	input.NodeURL = strings.TrimRight(strings.TrimSpace(input.NodeURL), "/")
+	input.NodeRole = strings.ToLower(strings.TrimSpace(input.NodeRole))
+	input.NodeVersion = strings.TrimSpace(input.NodeVersion)
+	input.RequesterToken = strings.TrimSpace(input.RequesterToken)
+	if input.NodeName == "" {
+		input.NodeName = "TM-DNS Secondary"
+	}
+	if input.NodeRole == "" {
+		input.NodeRole = "secondary"
+	}
+	if input.NodeRole != "secondary" {
+		return HAJoinRequest{}, errors.New("join requests must come from a secondary node")
+	}
+	if input.NodeURL == "" {
+		return HAJoinRequest{}, errors.New("node_url is required")
+	}
+	parsed, err := url.Parse(input.NodeURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return HAJoinRequest{}, errors.New("node_url must be a full http:// or https:// URL")
+	}
+	if input.RequesterToken == "" {
+		return HAJoinRequest{}, errors.New("requester admin token is required")
+	}
+	requests, err := s.haJoinRequestsRaw(ctx)
+	if err != nil {
+		return HAJoinRequest{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	encrypted, err := s.encryptSecret(input.RequesterToken)
+	if err != nil {
+		return HAJoinRequest{}, err
+	}
+	request := HAJoinRequest{
+		ID:             randomID(),
+		NodeName:       input.NodeName,
+		NodeURL:        input.NodeURL,
+		NodeRole:       input.NodeRole,
+		NodeVersion:    input.NodeVersion,
+		RequestedAt:    now,
+		Status:         "pending",
+		RequesterToken: encrypted,
+	}
+	replaced := false
+	for i := range requests {
+		if requests[i].NodeURL == input.NodeURL && requests[i].Status == "pending" {
+			request.ID = requests[i].ID
+			request.RequestedAt = now
+			requests[i] = request
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		requests = append(requests, request)
+	}
+	if err := s.saveHAJoinRequests(ctx, requests); err != nil {
+		return HAJoinRequest{}, err
+	}
+	_ = s.Audit(ctx, "ha.join.request", input.NodeURL, input.NodeName)
+	out := request
+	out.RequesterToken = ""
+	out.HasToken = true
+	return out, nil
+}
+
+func (s *Store) AcceptHAJoinRequest(ctx context.Context, id string) (HAJoinRequest, error) {
+	id = strings.TrimSpace(id)
+	requests, err := s.haJoinRequestsRaw(ctx)
+	if err != nil {
+		return HAJoinRequest{}, err
+	}
+	for i := range requests {
+		if requests[i].ID != id {
+			continue
+		}
+		if requests[i].Status != "pending" {
+			return HAJoinRequest{}, errors.New("join request is not pending")
+		}
+		token := s.decryptSecret(requests[i].RequesterToken)
+		if token == "" {
+			return HAJoinRequest{}, errors.New("join request token is unavailable")
+		}
+		if _, err := s.SaveHASettings(ctx, HASettings{
+			Enabled:   true,
+			Role:      "primary",
+			PeerName:  requests[i].NodeName,
+			PeerURL:   requests[i].NodeURL,
+			PeerToken: token,
+		}); err != nil {
+			return HAJoinRequest{}, err
+		}
+		requests[i].Status = "accepted"
+		if err := s.saveHAJoinRequests(ctx, requests); err != nil {
+			return HAJoinRequest{}, err
+		}
+		_ = s.Audit(ctx, "ha.join.accept", requests[i].NodeURL, requests[i].NodeName)
+		out := requests[i]
+		out.RequesterToken = token
+		out.HasToken = true
+		return out, nil
+	}
+	return HAJoinRequest{}, errors.New("join request not found")
+}
+
+func (s *Store) haJoinRequestsRaw(ctx context.Context) ([]HAJoinRequest, error) {
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'ha.join_requests'`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) || strings.TrimSpace(raw) == "" {
+		return []HAJoinRequest{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var requests []HAJoinRequest
+	if err := json.Unmarshal([]byte(raw), &requests); err != nil {
+		return nil, err
+	}
+	return requests, nil
+}
+
+func (s *Store) saveHAJoinRequests(ctx context.Context, requests []HAJoinRequest) error {
+	body, err := json.Marshal(requests)
+	if err != nil {
+		return err
+	}
+	return s.setSetting(ctx, "ha.join_requests", string(body))
+}
+
+func randomID() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:])
 }
 
 func (s *Store) TestHAPeer(ctx context.Context) (HAStatus, error) {

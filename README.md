@@ -72,6 +72,33 @@ DNS Server 1: primary TM-DNS Mac static IP
 DNS Server 2: secondary TM-DNS Mac static IP
 ```
 
+Recommended topology:
+
+```text
+Clients -> DHCP DNS option -> primary TM-DNS, secondary TM-DNS
+Primary TM-DNS -> upstream DNS resolver
+Secondary TM-DNS -> upstream DNS resolver
+Primary TM-DNS -> HA Push Sync -> Secondary TM-DNS
+```
+
+Setup flow:
+
+1. Install the same TM-DNS release on both Macs.
+2. Give each Mac a wired static IP or DHCP reservation.
+3. Open TM-DNS on the secondary Mac and go to Settings -> Onsite Secondary DNS.
+4. Enter the primary API URL, this Mac's API URL, this Mac's admin token, then click `Request Join`.
+5. Open TM-DNS on the primary Mac and go to Settings -> Onsite Secondary DNS.
+6. Click `Refresh Pending Requests`, review the requesting node name and URL, then click `Accept`.
+7. The primary stores the secondary as its peer and attempts to configure the secondary back to the primary.
+8. On the primary, click `Heartbeat`. It should report healthy.
+9. On the primary, click `Push Sync`.
+10. In DHCP, advertise both Mac IPs as DNS servers. Do not use DHCP relay.
+11. Renew DHCP on a test client and confirm queries appear in TM-DNS.
+
+The admin token is stored on each Mac in the TM-DNS application support directory unless `TMDNS_ADMIN_TOKEN` is set. When configuring a peer, use the token from the other Mac. Keep HA traffic on a trusted management LAN or VLAN.
+
+Pairing is approval-based. The secondary can request to join, but the primary must accept the pending request before HA settings are changed. Join requests include the secondary admin token so the primary can configure and sync to it; keep pairing on a trusted LAN, and prefer HTTPS when it is available.
+
 The primary pushes policy to the secondary. The secondary receives:
 
 - static records
@@ -83,6 +110,8 @@ The primary pushes policy to the secondary. The secondary receives:
 The secondary does not receive local query history, host observations, UniFi API keys, admin tokens, updater state, or machine-specific settings. Those remain local to each Mac.
 
 The native Overview page and web Dashboard warn when TM-DNS cannot verify a redundant peer. The warning clears when secondary DNS is enabled, configured with a peer token, and the heartbeat is current.
+
+Sync is currently operator-controlled from the UI. After changing rules, static records, blocklist presets, custom blocklist sources, or retention settings on the primary, click `Push Sync`. Query history and host observations are intentionally local to each node because each DNS server sees the client traffic that reaches it.
 
 For an emergency stop:
 

@@ -6,6 +6,8 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -121,6 +123,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/settings/retention/purge", s.retentionPurge)
 	s.mux.HandleFunc("/api/ha/settings", s.haSettings)
 	s.mux.HandleFunc("/api/ha/heartbeat", s.haHeartbeat)
+	s.mux.HandleFunc("/api/ha/discovery", s.haDiscovery)
+	s.mux.HandleFunc("/api/ha/discover", s.haDiscover)
+	s.mux.HandleFunc("/api/ha/join-requests", s.haJoinRequests)
+	s.mux.HandleFunc("/api/ha/join-requests/accept", s.haJoinAccept)
 	s.mux.HandleFunc("/api/ha/test", s.haTest)
 	s.mux.HandleFunc("/api/ha/sync", s.haSync)
 	s.mux.HandleFunc("/api/ha/import", s.haImport)
@@ -133,7 +139,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if s.isPublicPath(r.URL.Path) || isLoopbackRequest(r) || ok {
+		if s.isPublicPath(r.URL.Path) || (r.URL.Path == "/api/ha/join-requests" && r.Method == http.MethodPost) || isLoopbackRequest(r) || ok {
 			if ok && cookieAuth && !sameOriginUnsafeRequest(r) {
 				http.Error(w, "invalid request origin", http.StatusForbidden)
 				return
@@ -150,7 +156,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) isPublicPath(path string) bool {
-	return path == "/" || path == "/api/health" || path == "/api/auth/status" || path == "/api/auth/login"
+	return path == "/" || path == "/api/health" || path == "/api/auth/status" || path == "/api/auth/login" || path == "/api/ha/discovery"
 }
 
 func (s *Server) isProtectedHAPath(path string) bool {
@@ -758,6 +764,87 @@ func (s *Server) haHeartbeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "version": version.Info(), "ha": health})
 }
 
+func (s *Server) haDiscovery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	settings, _ := s.store.HASettings(r.Context())
+	writeJSON(w, map[string]any{
+		"ok":            true,
+		"name":          hostnameOrDefault(),
+		"url":           s.publicBaseURL(r),
+		"role":          settings.Role,
+		"ha_enabled":    settings.Enabled,
+		"configured":    settings.PeerURL != "" && settings.HasPeerToken,
+		"version":       version.Info(),
+		"requires_auth": true,
+	})
+}
+
+func (s *Server) haDiscover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nodes := discoverHANodes(r.Context())
+	writeJSON(w, nodes)
+}
+
+func (s *Server) haJoinRequests(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		requests, err := s.store.HAJoinRequests(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, requests)
+	case http.MethodPost:
+		var body store.HAJoinRequestInput
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, err)
+			return
+		}
+		request, err := s.store.SaveHAJoinRequest(r.Context(), body)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, request)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) haJoinAccept(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, err)
+		return
+	}
+	accepted, err := s.store.AcceptHAJoinRequest(r.Context(), body.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	configureErr := s.configureAcceptedSecondary(r.Context(), accepted, s.publicBaseURL(r))
+	accepted.RequesterToken = ""
+	out := map[string]any{"status": "accepted", "request": accepted}
+	if configureErr != nil {
+		out["warning"] = configureErr.Error()
+	} else {
+		out["secondary_configured"] = true
+	}
+	writeJSON(w, out)
+}
+
 func (s *Server) haTest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -769,6 +856,153 @@ func (s *Server) haTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, result)
+}
+
+func (s *Server) configureAcceptedSecondary(ctx context.Context, accepted store.HAJoinRequest, primaryURL string) error {
+	if accepted.RequesterToken == "" {
+		return nil
+	}
+	payload := store.HASettings{
+		Enabled:   true,
+		Role:      "secondary",
+		PeerName:  "Primary TM-DNS",
+		PeerURL:   primaryURL,
+		PeerToken: s.adminToken,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, accepted.NodeURL+"/api/ha/settings", strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+accepted.RequesterToken)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return errors.New(resp.Status)
+	}
+	return nil
+}
+
+func (s *Server) publicBaseURL(r *http.Request) string {
+	host := r.Host
+	if strings.HasPrefix(host, "127.0.0.1:") || strings.HasPrefix(host, "localhost:") || strings.HasPrefix(host, "[::1]:") {
+		if ip := firstLANIPv4(); ip != "" {
+			_, port, err := net.SplitHostPort(host)
+			if err != nil || port == "" {
+				port = "8080"
+			}
+			host = net.JoinHostPort(ip, port)
+		}
+	}
+	if host == "" {
+		host = "127.0.0.1:8080"
+	}
+	return "http://" + host
+}
+
+func firstLANIPv4() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			ip = ip.To4()
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			return ip.String()
+		}
+	}
+	return ""
+}
+
+func discoverHANodes(ctx context.Context) []map[string]any {
+	ip := firstLANIPv4()
+	if ip == "" {
+		return nil
+	}
+	parts := strings.Split(ip, ".")
+	if len(parts) != 4 {
+		return nil
+	}
+	prefix := strings.Join(parts[:3], ".")
+	client := &http.Client{Timeout: 350 * time.Millisecond}
+	type result struct {
+		node map[string]any
+	}
+	ch := make(chan result, 255)
+	for i := 1; i <= 254; i++ {
+		target := fmt.Sprintf("http://%s.%d:8080/api/ha/discovery", prefix, i)
+		if strings.Contains(target, "://"+ip+":") {
+			continue
+		}
+		go func() {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+			if err != nil {
+				ch <- result{}
+				return
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				ch <- result{}
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				ch <- result{}
+				return
+			}
+			var node map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&node); err != nil {
+				ch <- result{}
+				return
+			}
+			ch <- result{node: node}
+		}()
+	}
+	var nodes []map[string]any
+	for i := 1; i <= 253; i++ {
+		select {
+		case res := <-ch:
+			if res.node != nil {
+				nodes = append(nodes, res.node)
+			}
+		case <-time.After(900 * time.Millisecond):
+			return nodes
+		}
+	}
+	return nodes
+}
+
+func hostnameOrDefault() string {
+	name, err := os.Hostname()
+	if err != nil || strings.TrimSpace(name) == "" {
+		return "TM-DNS"
+	}
+	return name
 }
 
 func (s *Server) haSync(w http.ResponseWriter, r *http.Request) {

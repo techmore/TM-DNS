@@ -27,6 +27,12 @@ const indexHTML = `<!doctype html>
     .tabs button.active { background:var(--olive-200); color:var(--olive-950); box-shadow:inset 0 0 0 1px var(--olive-500); }
     .status { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; white-space:nowrap; }
     .dot { width:9px; height:9px; border-radius:50%; background:var(--green); box-shadow:0 0 0 3px rgba(90,138,94,.22); }
+    .ha-chip { display:none; align-items:center; gap:6px; border:1px solid rgba(176,125,42,.65); background:#ead8ad; color:var(--stone-900); border-radius:8px; padding:4px 8px; font:700 11px Inter; }
+    .ha-chip.visible { display:inline-flex; }
+    .ha-chip button { border:0; background:transparent; color:var(--olive-800); cursor:pointer; padding:0; font:800 12px Inter; }
+    .ha-help { display:none; position:absolute; top:44px; left:116px; width:min(360px, calc(100vw - 36px)); background:var(--olive-50); border:1px solid var(--olive-500); border-radius:8px; padding:12px; box-shadow:0 14px 30px rgba(28,25,23,.18); z-index:20; color:var(--stone-900); font:500 12px Inter; }
+    .ha-help.visible { display:block; }
+    .ha-help strong { display:block; font-size:13px; margin-bottom:6px; }
     .page { width:min(100%, 1840px); margin:0 auto; padding:18px; }
     .hero { background:var(--olive-200); color:var(--stone-900); border:1px solid var(--olive-400); border-radius:8px; padding:18px 20px; display:grid; grid-template-columns:1.2fr 2fr; gap:18px; align-items:end; }
     .hero h1 { font-size:36px; }
@@ -102,7 +108,7 @@ const indexHTML = `<!doctype html>
 <body>
   <nav class="topnav">
     <div class="topnav-inner">
-      <div class="brand"><span class="brand-mark">DNS</span><span>TM-DNS</span><span class="status"><span class="dot"></span><span id="statusText">starting</span></span></div>
+      <div class="brand"><span class="brand-mark">DNS</span><span>TM-DNS</span><span class="status"><span class="dot"></span><span id="statusText">starting</span></span><span id="haChip" class="ha-chip"><span>!</span><span>No secondary DNS</span><button type="button" onclick="toggleHAHelp()">i</button></span><div id="haHelp" class="ha-help"></div></div>
       <div class="tabs" id="tabs"></div>
     </div>
   </nav>
@@ -130,7 +136,7 @@ function pageFromHash() {
   return pages.includes(raw) ? raw : "Dashboard";
 }
 const initialPage = pageFromHash();
-let state = { page:initialPage, authed:false, dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], audit:[], hostReport:null, hostDetail:null, selectedHostID:initialHostID, unifi:null, retention:null, diagnostics:null, ha:null, lastFullLoad:0 };
+let state = { page:initialPage, authed:false, dashboard:null, realtime:[], blocked:[], hosts:[], rules:[], records:[], audit:[], hostReport:null, hostDetail:null, selectedHostID:initialHostID, unifi:null, retention:null, diagnostics:null, ha:null, haJoinRequests:[], lastFullLoad:0 };
 let blocklistPresets = [];
 let blocklistSources = [];
 const $ = s => document.querySelector(s);
@@ -157,6 +163,7 @@ function renderMetrics() {
   const dns = state.dashboard?.dns || {};
   const v = state.dashboard?.version || {};
   $("#statusText").textContent = dns.dns_addr ? 'healthy on '+dns.dns_addr+' · '+(v.version||'dev') : 'loading';
+  renderHAChip();
   $("#metrics").innerHTML = [
     ["Queries Today", d.queries_today || 0],
     ["Blocked Today", d.blocked_today || 0],
@@ -165,20 +172,35 @@ function renderMetrics() {
     ["Dropped Events", dns.dropped_events || 0],
   ].map(x => '<div class="card"><div class="metric-label">'+x[0]+'</div><div class="metric-value">'+x[1]+'</div></div>').join("");
 }
+function haWarningDetail() {
+  const ha = state.dashboard?.ha;
+  if (!ha) return "TM-DNS cannot confirm secondary DNS health yet. A single DNS server can take the network offline if this Mac is restarted, asleep, disconnected, or updating.";
+  if (!ha.enabled) return "Secondary DNS is not enabled. Put a second onsite TM-DNS server in DHCP as backup DNS before relying on this for production.";
+  if (!ha.configured) return "Secondary DNS is enabled but peer URL or peer token is missing. Complete peer setup, then run Heartbeat and Push Sync.";
+  if (ha.stale) return "Secondary DNS heartbeat is stale. Check the peer Mac, network path, admin token, and firewall access before making network-wide DNS changes.";
+  return "";
+}
+function renderHAChip() {
+  const detail = haWarningDetail();
+  const chip = $("#haChip");
+  const help = $("#haHelp");
+  if (!chip || !help) return;
+  chip.classList.toggle("visible", !!detail);
+  if (!detail) {
+    help.classList.remove("visible");
+    help.innerHTML = "";
+    return;
+  }
+  help.innerHTML = '<strong>Redundant DNS</strong><p style="margin:0 0 8px">'+esc(detail)+'</p><p class="muted" style="margin:0">Use two wired Macs with static IPs or DHCP reservations. Configure one as Primary, one as Secondary, run Heartbeat, Push Sync from the Primary, then advertise both IPs as DNS servers in DHCP.</p>';
+}
+function toggleHAHelp() {
+  renderHAChip();
+  $("#haHelp")?.classList.toggle("visible");
+}
 function applianceWarning() {
   const p = state.dashboard?.system?.power || {};
   if (!p.supported || !p.sleep_configured) return "";
   return '<div class="card" style="margin-top:12px;border-color:rgba(176,125,42,.55);background:#eee5d1"><div class="section-title"><h2>Appliance Mode Warning</h2><span class="muted mono">'+esc(p.profile||'power')+'</span></div><p style="margin-top:0;color:var(--stone-900)">This Mac is still configured to sleep after '+esc(p.system_sleep_minutes)+' minutes. If it sleeps, TM-DNS can stop answering DNS for the network.</p><div class="toolbar"><a class="button-link" href="x-apple.systempreferences:com.apple.Battery-Settings.extension">Open macOS Power Settings</a><span class="muted mono">Terminal: sudo pmset -a sleep 0</span></div></div>';
-}
-function redundancyWarning() {
-  const ha = state.dashboard?.ha;
-  let detail = "";
-  if (!ha) detail = "TM-DNS cannot confirm secondary DNS health yet. A single DNS server can take the network offline if this Mac is restarted, asleep, disconnected, or updating.";
-  else if (!ha.enabled) detail = "Secondary DNS is not enabled. Put a second onsite TM-DNS server in DHCP as backup DNS before relying on this for production.";
-  else if (!ha.configured) detail = "Secondary DNS is enabled but peer URL or peer token is missing. Complete peer setup, then run Heartbeat and Push Sync.";
-  else if (ha.stale) detail = "Secondary DNS heartbeat is stale. Check the peer Mac, network path, admin token, and firewall access before making network-wide DNS changes.";
-  if (!detail) return "";
-  return '<div class="card" style="margin-top:12px;border-color:rgba(176,125,42,.65);background:#ead8ad"><div class="section-title"><h2>No Verified Redundant DNS Server</h2><span class="muted mono">high availability</span></div><p style="margin-top:0;color:var(--stone-900)">'+esc(detail)+'</p><p class="muted" style="margin:0">Recommended: two wired Macs with static IPs, both advertised by DHCP as DNS servers.</p></div>';
 }
 function eventsTable(events) {
   return '<div class="table-wrap"><table class="events-table"><thead><tr><th>Time</th><th>Host</th><th>Domain</th><th>Type</th><th>Action</th><th>Rule/List</th><th>Latency</th><th>Answer</th></tr></thead><tbody>'+
@@ -250,7 +272,7 @@ function blocklistSourceCards() {
 function render() {
   renderTabs(); renderMetrics();
   const d = state.dashboard?.dashboard || {};
-  if (state.page === "Dashboard") $("#view").innerHTML = applianceWarning()+redundancyWarning()+systemCards()+'<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Hosts</h2><span class="muted">name, DNS name, IP</span></div>'+topHostsList(d.top_hosts||[])+'</div><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">last 48 hours, one-click policy</span></div>'+topList(d.top_domains||[], {block:true})+'</div></div>';
+  if (state.page === "Dashboard") $("#view").innerHTML = applianceWarning()+systemCards()+'<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Activity</h2><span class="muted">latest DNS decisions</span></div>'+eventsTable(d.recent||[])+'</div><div class="summary-grid"><div class="card"><div class="section-title"><h2>Top Hosts</h2><span class="muted">name, DNS name, IP</span></div>'+topHostsList(d.top_hosts||[])+'</div><div class="card"><div class="section-title"><h2>Top Domains</h2><span class="muted">last 48 hours, one-click policy</span></div>'+topList(d.top_domains||[], {block:true})+'</div></div>';
   if (state.page === "Realtime") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Realtime Firewall View</h2><span class="muted">auto-refreshes every 5s</span></div>'+eventsTable(state.realtime)+'</div>';
   if (state.page === "Blocked") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Blocked Attempts</h2><span class="muted">who, what, why, when</span></div>'+eventsTable(state.blocked)+'</div>';
   if (state.page === "Hosts") $("#view").innerHTML = '<div class="card" style="margin-top:12px"><div class="section-title"><h2>Hosts</h2><span class="muted">click a host to open its detail view</span></div><div class="table-wrap"><table><thead><tr><th>Host</th><th>IP</th><th>MAC / Vendor</th><th>Identity</th><th>Last Seen</th><th>Queries</th><th>Blocks</th></tr></thead><tbody>'+state.hosts.map(h => '<tr class="clickable '+(state.selectedHostID===h.id?'selected':'')+'" onclick="selectHost('+h.id+')"><td><strong>'+esc(h.label||h.hostname||h.source_ip)+'</strong><div class="muted mono">'+esc(h.hostname||'hostname not learned yet')+'</div></td><td class="mono">'+esc(h.source_ip)+'</td><td class="mono">'+esc(h.mac||'')+'<div class="muted">'+esc(h.vendor||'')+'</div></td><td>'+esc(h.identity_confidence)+'<div class="muted mono">'+esc(h.identity_last_checked||'not checked yet')+'</div></td><td>'+h.last_seen+'</td><td>'+h.query_count+'</td><td>'+h.block_count+'</td></tr>').join("")+'</tbody></table></div></div>';
@@ -284,6 +306,7 @@ async function load(full = true) {
     state.retention = await api('/api/settings/retention');
     state.diagnostics = await api('/api/diagnostics');
     state.ha = await api('/api/ha/settings');
+    state.haJoinRequests = await api('/api/ha/join-requests');
     blocklistPresets = await api('/api/blocklist-presets');
     blocklistSources = await api('/api/blocklist-sources');
     state.hostReport = state.selectedHostID ? await api('/api/reports/host/'+state.selectedHostID) : null;
@@ -396,6 +419,15 @@ async function purgeRetention() {
 }
 async function saveHA() {
   state.ha = await api('/api/ha/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:$("#haEnabled").checked, role:$("#haRole").value, peer_name:$("#haPeerName").value, peer_url:$("#haPeerURL").value, peer_token:$("#haPeerToken").value})});
+  await load();
+}
+async function requestHAJoin() {
+  const result = await api($("#joinPrimaryURL").value.replace(/\/$/, '')+'/api/ha/join-requests', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({node_name:$("#joinNodeName").value || 'TM-DNS Secondary', node_url:$("#joinLocalURL").value, node_role:'secondary', node_version:(state.dashboard?.version?.version || 'unknown'), requester_token:$("#joinToken").value})});
+  alert('Join request sent: '+result.status);
+}
+async function acceptHAJoin(id) {
+  const result = await api('/api/ha/join-requests/accept', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id})});
+  alert(result.secondary_configured ? 'Join accepted and secondary configured.' : 'Join accepted. Secondary warning: '+(result.warning||'manual configuration may be needed'));
   await load();
 }
 async function testHA() {
